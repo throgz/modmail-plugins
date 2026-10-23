@@ -279,6 +279,29 @@ def test_nothing_is_sent_while_off_paused_without_a_key_or_without_words():
     assert session.requests == []
 
 
+def attached(content, *names):
+    sent = message(content)
+    sent.attachments = [SimpleNamespace(filename=n, url=f"https://cdn.discordapp.com/attachments/1/2/{n}?ex=1&is=2&hm=3&") for n in names]
+    return sent
+
+
+def test_a_members_screenshots_are_sent_as_images_and_other_files_as_names():
+    cog, session, thread = plugin()
+    run(cog.on_thread_reply(thread, False, attached("It breaks here", "error.PNG", "log.txt"), False, False))
+    body = session.requests[0]["body"]
+    assert body["message"] == "It breaks here\n[file: log.txt]"
+    assert body["images"] == ["https://cdn.discordapp.com/attachments/1/2/error.PNG?ex=1&is=2&hm=3&"]
+
+
+def test_a_screenshot_on_its_own_is_answered_but_a_file_on_its_own_is_not():
+    cog, session, thread = plugin()
+    run(cog.on_thread_reply(thread, False, attached("", "a.png", "b.jpg", "c.webp", "d.gif", "e.jpeg"), False, False))
+    body = session.requests[0]["body"]
+    assert body["message"] == "" and len(body["images"]) == dexbi.MAX_IMAGES
+    run(cog.on_thread_reply(thread, False, attached("", "invoice.pdf"), False, False))
+    assert len(session.requests) == 1
+
+
 # what the plugin does with the answer
 
 

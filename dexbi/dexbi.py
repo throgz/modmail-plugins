@@ -88,6 +88,10 @@ def to_embed_text(markdown):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+def is_image(attachment):
+    return urlsplit(attachment.url).path.lower().endswith(IMAGE_TYPES)
+
+
 def image_urls(markdown):
     return [m.group(2) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
 
@@ -232,13 +236,17 @@ class Dexbi(commands.Cog):
             await self.save(paused=[c for c in self.config["paused"] if c != channel_id])
 
     async def answer_member(self, thread, message):
+        images = [a.url for a in message.attachments if is_image(a)][:MAX_IMAGES]
+        files = [f"[file: {a.filename}]" for a in message.attachments if not is_image(a)]
         text = message.content.strip()
-        if not text:
+        # a file on its own gives Dexbi nothing to read
+        if not text and not images:
             return
-        answer = await self.ask(
-            thread,
-            {"messageId": str(message.id), "member": person_of(message.author), "message": text[:MAX_MESSAGE_CHARS]},
-        )
+        text = "\n".join([text, *files]).strip()
+        body = {"messageId": str(message.id), "member": person_of(message.author), "message": text[:MAX_MESSAGE_CHARS]}
+        if images:
+            body["images"] = images
+        answer = await self.ask(thread, body)
         if answer:
             await self.act(thread, message, answer)
 
