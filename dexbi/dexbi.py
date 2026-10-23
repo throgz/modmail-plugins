@@ -89,6 +89,17 @@ def image_urls(markdown):
     return [m.group(2) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
 
 
+def image_name(alt, url, number):
+    ext = urlsplit(url).path.rsplit(".", 1)[-1].lower()
+    words = re.findall(r"[a-z0-9]+", alt.lower())[:6]
+    return f"{'-'.join(words) or f'screenshot-{number}'}.{ext}"
+
+
+def named_images(markdown):
+    found = [(m.group(1), m.group(2)) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
+    return [(image_name(alt, url, i), url) for i, (alt, url) in enumerate(found, 1)]
+
+
 def split_text(text, limit=EMBED_LIMIT):
     if len(text) <= limit:
         return [text]
@@ -264,7 +275,7 @@ class Dexbi(commands.Cog):
             await thread.close(closer=thread.channel.guild.me)
 
     async def reply(self, thread, member_message, markdown):
-        files = await self.download_images(image_urls(markdown))
+        files = await self.download_images(named_images(markdown))
         attachments = await self.host_images(files)
         text = to_embed_text(markdown)
         parts = split_text(text) if text else [""] if attachments else []
@@ -283,9 +294,9 @@ class Dexbi(commands.Cog):
         if files and not attachments:
             await self.send_files(thread, files)
 
-    async def download_images(self, urls):
+    async def download_images(self, images):
         files = []
-        for url in urls[:MAX_IMAGES]:
+        for name, url in images[:MAX_IMAGES]:
             try:
                 async with self.bot.session.get(url, timeout=TIMEOUT) as resp:
                     if resp.status != 200:
@@ -293,7 +304,7 @@ class Dexbi(commands.Cog):
                     data = await resp.read()
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 continue
-            files.append((urlsplit(url).path.rsplit("/", 1)[-1] or "image.png", data))
+            files.append((name, data))
         return files
 
     async def host_images(self, files):

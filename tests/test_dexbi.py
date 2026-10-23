@@ -289,9 +289,9 @@ def test_images_ride_on_the_reply_like_staff_attachments_with_no_gap():
     member_says(cog, thread)
     [sent] = thread.replies
     assert sent.content == "**Steps**\n\n1. Open Deploy."
-    assert [a.filename for a in sent.message.attachments] == ["d.webp", "m.png"]
+    assert [a.filename for a in sent.message.attachments] == ["deploy.webp", "menu.png"]
     [upload] = cog.bot.log_channel.sent
-    assert [f.filename for f in upload.files] == ["d.webp", "m.png"]
+    assert [f.filename for f in upload.files] == ["deploy.webp", "menu.png"]
 
 
 def test_without_a_log_channel_images_are_sent_after_the_reply():
@@ -303,7 +303,7 @@ def test_without_a_log_channel_images_are_sent_after_the_reply():
     assert sent.message.attachments == []
     for target in (thread.recipient, thread.channel):
         [files] = [m.files for m in target.sent if m.files]
-        assert [f.filename for f in files] == ["d.webp"]
+        assert [f.filename for f in files] == ["deploy.webp"]
 
 
 def test_an_image_that_cannot_be_downloaded_is_skipped():
@@ -320,7 +320,12 @@ def test_an_answer_that_is_only_an_image_sends_it_in_a_reply():
     session.answers.append((200, answer("reply", "![Deploy](https://cdn.example.com/d.webp)")))
     member_says(cog, thread)
     [sent] = thread.replies
-    assert sent.content == "" and [a.filename for a in sent.message.attachments] == ["d.webp"]
+    assert sent.content == "" and [a.filename for a in sent.message.attachments] == ["deploy.webp"]
+
+
+def test_image_names_come_from_what_they_show():
+    assert dexbi.image_name("The Deploy page with New highlighted", "https://x.io/a1b2.webp", 1) == "the-deploy-page-with-new-highlighted.webp"
+    assert dexbi.image_name("", "https://x.io/a1b2.PNG", 2) == "screenshot-2.png"
 
 
 def test_a_long_reply_is_sent_in_parts():
