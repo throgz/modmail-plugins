@@ -33,8 +33,11 @@ TICKET_SETTINGS = {
 }
 
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
-IMAGE = re.compile(r"!\[([^\]]*)\]\((\S+?)(?:\s+\"[^\"]*\")?\)")
+# ![alt](url), and [text](url) too: the model sometimes links a screenshot instead of showing it
+IMAGE = re.compile(r"!?\[([^\]]*)\]\((\S+?)(?:\s+\"[^\"]*\")?\)")
 IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+# a bare link to an image, not part of a markdown link or image
+BARE_IMAGE = re.compile(r"(?<![(\[<])https?://\S+?\.(?:png|jpe?g|gif|webp)(?:\?\S*)?(?=[\s)>.,]*(?:\s|$))", re.IGNORECASE)
 RULE = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
 TABLE_DIVIDER = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 
@@ -77,8 +80,8 @@ def to_embed_text(markdown):
         elif HEADING.match(line):
             lines.append(f"**{HEADING.match(line).group(1).replace('**', '')}**")
         elif not RULE.match(line):
-            text = IMAGE.sub(image_link, line).rstrip()
-            if text or not IMAGE.search(line):
+            text = BARE_IMAGE.sub("", IMAGE.sub(image_link, line)).rstrip()
+            if text or not (IMAGE.search(line) or BARE_IMAGE.search(line)):
                 lines.append(text)
     if table:
         lines += table_lines(table)
@@ -91,12 +94,13 @@ def image_urls(markdown):
 
 def image_name(alt, url, number):
     ext = urlsplit(url).path.rsplit(".", 1)[-1].lower()
-    words = re.findall(r"[a-z0-9]+", alt.lower())[:6]
+    words = [] if alt.startswith("http") else re.findall(r"[a-z0-9]+", alt.lower())[:6]
     return f"{'-'.join(words) or f'screenshot-{number}'}.{ext}"
 
 
 def named_images(markdown):
     found = [(m.group(1), m.group(2)) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
+    found += [("", m.group(0)) for m in BARE_IMAGE.finditer(IMAGE.sub("", markdown))]
     return [(image_name(alt, url, i), url) for i, (alt, url) in enumerate(found, 1)]
 
 

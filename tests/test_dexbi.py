@@ -577,3 +577,25 @@ def test_the_cog_and_its_commands_load():
     assert {"dexbi", "dexbi key", "dexbi on", "dexbi off", "dexbi role", "dexbi style", "dexbi anon",
             "dexbi test", "dexbi pause", "dexbi resume", "dexbi status", "dexbi setup"} <= names
     assert isinstance(dexbi.make_embed("x"), discord.Embed)
+
+
+def test_a_bare_image_link_is_attached_and_taken_out_of_the_text():
+    cog, session, thread = plugin()
+    reply = "Here's the button: https://cdn.example.com/a/new-button.webp\nThen click it."
+    session.answers.append((200, answer("reply", reply)))
+    member_says(cog, thread)
+    [sent] = thread.replies
+    assert sent.content == "Here's the button:\nThen click it."
+    assert [a.filename for a in sent.message.attachments] == ["screenshot-1.webp"]
+
+
+def test_a_normal_link_stays_in_the_text():
+    text = dexbi.to_embed_text("See [the docs](https://docs.example.com/setup) and https://example.com/page")
+    assert text == "See [the docs](https://docs.example.com/setup) and https://example.com/page"
+
+
+def test_a_link_to_a_screenshot_is_attached_not_shown_as_an_address():
+    url = "https://pub-1.r2.dev/tenants/9dcf/documents/d0/v1/images/d27d.webp"
+    reply = f"Here's the New button: [{url}]({url})\nThen click it."
+    assert dexbi.to_embed_text(reply) == "Here's the New button:\nThen click it."
+    assert dexbi.named_images(reply) == [("screenshot-1.webp", url)]
