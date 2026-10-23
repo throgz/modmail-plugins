@@ -10,6 +10,7 @@ import dexbi
 
 BOT_ID = 1
 ROLE_ID = 55
+OTHER_ROLE_ID = 56
 
 
 def run(coro):
@@ -49,8 +50,8 @@ class FakeSession:
         self.requests.append({"url": url})
         return FakeResponse(404 if "missing" in url else 200, b"png-bytes")
 
-    def post(self, url, *, json, headers, timeout):
-        self.requests.append({"url": url, "body": json, "headers": headers})
+    def request(self, method, url, *, json=None, headers=None, timeout=None):
+        self.requests.append({"method": method, "url": url, "body": json, "headers": headers})
         status, payload = self.answers.pop(0) if self.answers else (200, answer("none"))
         return FakeResponse(status, payload)
 
@@ -67,7 +68,9 @@ class FakeCollection:
 
 
 ROLE = SimpleNamespace(id=ROLE_ID, name="Support", mention=f"<@&{ROLE_ID}>")
-GUILD = SimpleNamespace(me=SimpleNamespace(id=BOT_ID, roles=[]), get_role=lambda i: ROLE if i == ROLE_ID else None)
+OTHER_ROLE = SimpleNamespace(id=OTHER_ROLE_ID, name="Billing", mention=f"<@&{OTHER_ROLE_ID}>")
+ROLES = {ROLE_ID: ROLE, OTHER_ROLE_ID: OTHER_ROLE}
+GUILD = SimpleNamespace(me=SimpleNamespace(id=BOT_ID, roles=[]), get_role=ROLES.get)
 
 
 class FakeChannel:
@@ -149,6 +152,10 @@ def message(content, author_id=42, name="Alex"):
 
 def answer(action, text=None, staff_note=None, title=None):
     return {"action": action, "message": text, "staffNote": staff_note, "title": title, "conversation": "modmail-900"}
+
+
+def deployment(reply_as="bot", roles=()):
+    return {"id": "dep-1", "name": "Modmail", "replyAs": reply_as, "handoverRoleIds": [str(r) for r in roles]}
 
 
 async def get_contexts(message):
@@ -270,7 +277,7 @@ def test_dexbis_own_replies_are_never_sent_back():
 
 
 def test_nothing_is_sent_while_off_paused_without_a_key_or_without_words():
-    for config in ({"enabled": False}, {"key": None}, {"paused": [900]}):
+    for config in ({"key": None}, {"paused": [900]}):
         cog, session, thread = plugin(config)
         member_says(cog, thread)
         staff_says(cog, thread, "?reply hi")
@@ -379,10 +386,36 @@ def test_a_long_reply_is_sent_in_parts():
     assert all(r.message.content == r.content for r in thread.replies)
 
 
-def test_reply_follows_the_style_setting():
-    cog, session, thread = plugin({"anonymous": True})
+def test_reply_as_anonymous_staff_comes_from_the_dashboard():
+    cog, session, thread = plugin({"deployment": deployment("anonymous"), "anonymous": False})
     session.answers.append((200, answer("reply", "Refunds take 5 days.")))
     member_says(cog, thread)
+    assert thread.replies[0].anonymous is True
+
+
+def test_a_manual_key_keeps_the_settings_it_had():
+    cog, session, thread = plugin({"anonymous": True, "role_id": ROLE_ID, "wait": 10})
+    session.answers.append((200, answer("handover", "A teammate will help.")))
+    member_says(cog, thread)
+    assert session.requests[0]["body"]["settings"]["teamWaitMinutes"] == 10
+    assert thread.replies[0].anonymous is True
+    assert thread.channel.sent[0].content == ROLE.mention
+
+
+def test_handover_pings_the_roles_from_the_dashboard():
+    cog, session, thread = plugin({"deployment": deployment(roles=[ROLE_ID, OTHER_ROLE_ID, 99]), "role_id": None})
+    session.answers.append((200, answer("handover", None, staff_note="Charged twice.")))
+    member_says(cog, thread)
+    [alert] = thread.channel.sent
+    assert alert.content == f"{ROLE.mention} {OTHER_ROLE.mention}"
+    assert [role.id for role in alert.mentions.roles] == [ROLE_ID, OTHER_ROLE_ID]
+
+
+def test_an_answer_brings_the_latest_dashboard_settings():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((200, {**answer("reply", "Refunds take 5 days."), "deployment": deployment("anonymous")}))
+    member_says(cog, thread)
+    assert cog.config["deployment"]["replyAs"] == "anonymous"
     assert thread.replies[0].anonymous is True
 
 
@@ -444,13 +477,21 @@ def test_a_failure_is_told_to_staff_once_per_kind_and_never_to_the_member():
     assert thread.replies == [] and cog.last_error.endswith(notes[1].description)
 
 
+def test_a_bot_that_was_disconnected_says_how_to_connect_again():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}}))
+    member_says(cog, thread)
+    note = thread.channel.sent[0].embed.description
+    assert "isn't connected to Dexbi anymore" in note and "**Deploy**" in note
+
+
 def test_dexbi_being_down_says_it_will_answer_again():
     cog, session, thread = plugin()
 
     def down(*args, **kwargs):
         raise dexbi.aiohttp.ClientConnectionError()
 
-    session.post = down
+    session.request = down
     member_says(cog, thread)
     assert "answers again once it's back" in thread.channel.sent[0].embed.description
 
@@ -591,92 +632,114 @@ def test_closing_or_pausing_a_thread_ends_its_wait(monkeypatch):
         assert cog.waits == {}
 
 
-def test_wait_sets_the_minutes_dexbi_gives_staff():
-    cog, session, thread = plugin()
-    ctx = FakeContext(FakeChannel(1), command="dexbi wait")
-    run(cog.dexbi_wait.callback(cog, ctx, 10))
-    assert cog.config["wait"] == 10 and "10 min" in ctx.embed.description
+# connecting
+
+
+def test_connect_saves_the_key_and_the_deployment():
+    cog, session, thread = plugin({"key": None})
+    session.answers.append((200, {"key": "dexbi_connected", "deployment": deployment("anonymous", [ROLE_ID])}))
+    ctx = FakeContext(FakeChannel(1), command="dexbi connect")
+    run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
+    request = session.requests[0]
+    assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {}
+    assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
+    assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
-    assert session.requests[-1]["body"]["settings"]["teamWaitMinutes"] == 10
-    for minutes in (0, 61):
-        try:
-            run(cog.dexbi_wait.callback(cog, ctx, minutes))
-            raise AssertionError("accepted")
-        except commands.BadArgument:
-            pass
-    assert cog.config["wait"] == 10
+    assert session.requests[-1]["headers"]["Authorization"] == "Bearer dexbi_connected"
+
+
+def test_a_bad_code_says_why():
+    cog, session, thread = plugin({"key": None})
+    message = "That code didn't work. Get a new one in the Dexbi dashboard."
+    session.answers.append((400, {"error": {"code": "invalid_code", "message": message}}))
+    ctx = FakeContext(FakeChannel(1), command="dexbi connect")
+    run(cog.dexbi_connect.callback(cog, ctx, code="nope"))
+    assert ctx.embed.title == "Couldn't connect" and ctx.embed.description == message
+    assert cog.config["key"] is None
+
+
+def test_checking_in_picks_up_dashboard_changes():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((200, {"deployment": deployment("anonymous", [ROLE_ID])}))
+    run(cog.check_in())
+    request = session.requests[0]
+    assert request["method"] == "GET" and request["url"] == "https://api.dexbi.app/v1/modmail/status"
+    assert request["headers"]["Authorization"] == "Bearer dexbi_test"
+    assert cog.config["deployment"]["replyAs"] == "anonymous" and cog.last_error is None
+
+
+def test_checking_in_quietly_skips_an_older_dexbi_and_notes_a_dead_key():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers += [(404, "Not Found"), (401, {"error": {"code": "invalid_key", "message": "Bad key."}})]
+    run(cog.check_in())
+    assert cog.last_error is None and cog.config["deployment"] == deployment()
+    run(cog.check_in())
+    assert "isn't connected to Dexbi anymore" in cog.last_error
+    assert thread.channel.sent == []
+
+
+def test_without_a_key_there_is_no_check_in():
+    cog, session, thread = plugin({"key": None})
+    run(cog.check_in())
+    assert session.requests == []
 
 
 # commands
 
 
-def test_status_shows_settings_and_commands():
-    cog, session, thread = plugin({"role_id": ROLE_ID})
+def test_status_shows_the_connection_settings_and_commands():
+    cog, session, thread = plugin({"deployment": deployment("anonymous", [ROLE_ID])})
+    session.answers.append((200, {"deployment": deployment("anonymous", [ROLE_ID])}))
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi.callback(cog, ctx))
     fields = {field.name: field.value for field in ctx.embed.fields}
-    assert fields["Status"] == "On" and fields["API key"] == "Working"
-    assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "The bot"
-    assert fields["Waits for staff"] == "5 min"
-    assert "?dexbi test" in fields["Commands"] and "?dexbi pause" in fields["Commands"] and "?dexbi wait" in fields["Commands"]
+    assert fields["Connection"] == "Connected to **Modmail**" and fields["Check"] == "Working"
+    assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "Anonymous staff"
+    assert "?dexbi connect" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
+    assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
     assert ctx.embed.color.value == dexbi.COLOR
-    assert session.requests[0]["body"]["author"] == "staff"
+    assert session.requests[1]["body"]["author"] == "staff"
+
+
+def test_status_with_a_manual_key():
+    cog, session, thread = plugin({"role_id": ROLE_ID})
+    session.answers.append((200, {"deployment": None}))
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi.callback(cog, ctx))
+    fields = {field.name: field.value for field in ctx.embed.fields}
+    assert fields["Connection"] == "Manual API key" and fields["Hand-over ping"] == ROLE.mention
 
 
 def test_status_says_when_the_key_does_not_work():
     cog, session, thread = plugin()
-    session.answers.append((401, {"error": {"code": "invalid_key", "message": "Bad key."}}))
+    bad_key = (401, {"error": {"code": "invalid_key", "message": "Bad key."}})
+    session.answers += [bad_key, bad_key]
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi_status.callback(cog, ctx))
-    assert {f.name: f.value for f in ctx.embed.fields}["API key"].startswith("Not working: The API key is wrong")
+    assert {f.name: f.value for f in ctx.embed.fields}["Check"].startswith("Not working: The API key is wrong")
 
 
 def test_without_a_key_status_shows_the_setup_steps():
     cog, session, thread = plugin({"key": None})
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi.callback(cog, ctx))
-    assert ctx.embed.title == "Set up Dexbi" and "?dexbi key <your key>" in ctx.embed.description
+    assert ctx.embed.title == "Set up Dexbi" and "?dexbi connect <code>" in ctx.embed.description
+    assert "**Deploy**" in ctx.embed.description and "**Modmail**" in ctx.embed.description
     assert session.requests == []
 
 
 def test_key_is_deleted_saved_and_checked():
-    cog, session, thread = plugin({"key": None})
+    cog, session, thread = plugin({"key": None, "deployment": deployment()})
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi_key.callback(cog, ctx, " dexbi_new "))
-    assert ctx.message.deleted and cog.config["key"] == "dexbi_new"
+    assert ctx.message.deleted and cog.config["key"] == "dexbi_new" and cog.config["deployment"] is None
     assert session.requests[0]["headers"]["Authorization"] == "Bearer dexbi_new"
     assert ctx.embed.title == "You're all set"
 
     session.answers.append((401, {"error": {"code": "invalid_key", "message": "Bad key."}}))
     run(cog.dexbi_key.callback(cog, ctx, "dexbi_bad"))
     assert ctx.embed.title == "Key saved, but it doesn't work" and "?dexbi key" in ctx.embed.description
-
-
-def test_on_and_off():
-    cog, session, thread = plugin()
-    ctx = FakeContext(FakeChannel(1))
-    run(cog.dexbi_off.callback(cog, ctx))
-    assert cog.enabled is False and ctx.embed.title == "Dexbi is off"
-    run(cog.dexbi_on.callback(cog, ctx))
-    assert cog.enabled is True and ctx.embed.title == "Dexbi is on"
-
-
-def test_role_and_none():
-    cog, session, thread = plugin()
-    ctx = FakeContext(FakeChannel(1))
-    run(cog.dexbi_role.callback(cog, ctx, ROLE))
-    assert cog.config["role_id"] == ROLE_ID and ROLE.mention in ctx.embed.description
-    run(cog.dexbi_role.callback(cog, ctx, "none"))
-    assert cog.config["role_id"] is None
-
-
-def test_style_and_the_anon_alias():
-    cog, session, thread = plugin()
-    ctx = FakeContext(FakeChannel(1))
-    run(cog.dexbi_style.callback(cog, ctx, "anonymous"))
-    assert cog.config["anonymous"] is True
-    run(cog.dexbi_anon.callback(cog, ctx, "off"))
-    assert cog.config["anonymous"] is False and "the bot" in ctx.embed.description
 
 
 def test_test_shows_the_answer_here_and_messages_no_member():
@@ -729,8 +792,8 @@ def test_a_wrong_argument_shows_the_usage():
 
 def test_the_cog_and_its_commands_load():
     names = {command.qualified_name for command in dexbi.Dexbi.__cog_commands__}
-    assert {"dexbi", "dexbi key", "dexbi on", "dexbi off", "dexbi role", "dexbi style", "dexbi anon",
-            "dexbi test", "dexbi pause", "dexbi resume", "dexbi status", "dexbi setup", "dexbi wait"} <= names
+    assert names == {"dexbi", "dexbi connect", "dexbi key", "dexbi test", "dexbi pause", "dexbi resume",
+                     "dexbi status", "dexbi setup"}
     assert isinstance(dexbi.make_embed("x"), discord.Embed)
 
 

@@ -2,7 +2,6 @@ import asyncio
 import copy
 import io
 import re
-import typing
 import uuid
 from urllib.parse import urlsplit
 
@@ -15,7 +14,7 @@ from core.models import DummyMessage, PermissionLevel, getLogger
 
 logger = getLogger(__name__)
 
-API_URL = "https://api.dexbi.app/v1/messages"
+API_URL = "https://api.dexbi.app/v1"
 DASHBOARD_URL = "https://dash.dexbi.app"
 TIMEOUT = aiohttp.ClientTimeout(total=60)
 MAX_IMAGES = 4
@@ -23,6 +22,7 @@ MAX_MESSAGE_CHARS = 4000
 EMBED_LIMIT = 4096
 COLOR = 0x3ECF8E
 DEFAULT_WAIT = 5
+CHECK_IN_SECONDS = 600
 
 TICKET_SETTINGS = {
     "agent": "ticket",
@@ -150,7 +150,12 @@ def person_of(user):
     return {"id": str(user.id), "name": user.display_name[:100]}
 
 
-def explain(error, prefix):
+def explain(error, prefix, connected=False):
+    if error.kind == "invalid_key" and connected:
+        return (
+            "This bot isn't connected to Dexbi anymore. In the Dexbi dashboard open **Deploy**, open your "
+            "Modmail deployment (or **New** > **Modmail**) and run the connect command it shows."
+        )
     if error.kind == "invalid_key":
         return (
             f"The API key is wrong or was deleted. Create a new one in the [Dexbi dashboard]({DASHBOARD_URL}) "
@@ -206,13 +211,24 @@ class Dexbi(commands.Cog):
         self.locks = {}
         # thread channel id -> the countdown and the member messages waiting for staff
         self.waits = {}
+        self.checking_in = None
 
     async def cog_load(self):
         self.config = await self.db.find_one({"_id": "config"}) or {}
+        self.checking_in = asyncio.ensure_future(self.keep_checking_in())
+
+    async def cog_unload(self):
+        if self.checking_in:
+            self.checking_in.cancel()
 
     @property
     def enabled(self):
-        return bool(self.config.get("key")) and self.config.get("enabled", True)
+        return bool(self.config.get("key"))
+
+    @property
+    def deployment(self):
+        # the dashboard deployment this bot is connected to, None with a manual key
+        return self.config.get("deployment")
 
     def paused(self, channel_id):
         return channel_id in self.config.get("paused", [])
@@ -221,10 +237,12 @@ class Dexbi(commands.Cog):
         self.config.update(changes)
         await self.db.update_one({"_id": "config"}, {"$set": changes}, upsert=True)
 
-    async def call_api(self, body):
-        headers = {"Authorization": f"Bearer {self.config.get('key', '')}"}
+    async def call(self, method, path, body=None, auth=True):
+        headers = {"Authorization": f"Bearer {self.config.get('key', '')}"} if auth else {}
         try:
-            async with self.bot.session.post(API_URL, json=body, headers=headers, timeout=TIMEOUT) as resp:
+            async with self.bot.session.request(
+                method, f"{API_URL}/{path}", json=body, headers=headers, timeout=TIMEOUT
+            ) as resp:
                 payload = await resp.json(content_type=None)
                 status = resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
@@ -232,7 +250,34 @@ class Dexbi(commands.Cog):
         if status == 200 and isinstance(payload, dict):
             return payload
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        raise DexbiError(error.get("code", "internal"), error.get("message", f"Dexbi answered with HTTP {status}."))
+        kind = error.get("code") or ("not_found" if status == 404 else "internal")
+        raise DexbiError(kind, error.get("message", f"Dexbi answered with HTTP {status}."))
+
+    async def call_api(self, body):
+        answer = await self.call("POST", "messages", body)
+        if "deployment" in answer:
+            await self.remember(answer["deployment"])
+        return answer
+
+    async def remember(self, deployment):
+        if deployment != self.deployment:
+            await self.save(deployment=deployment)
+
+    async def check_in(self):
+        # lets the dashboard see this bot, and picks up changes made there
+        if not self.enabled:
+            return
+        try:
+            await self.remember((await self.call("GET", "modmail/status")).get("deployment"))
+        except DexbiError as e:
+            if e.kind != "not_found":
+                self.last_error = f"Dexbi check-in failed: {explain(e, self.bot.prefix, bool(self.deployment))}"
+                logger.warning(self.last_error)
+
+    async def keep_checking_in(self):
+        while True:
+            await self.check_in()
+            await asyncio.sleep(CHECK_IN_SECONDS)
 
     async def check_key(self, user):
         # staff messages are free, so this doesn't use up anything
@@ -241,17 +286,28 @@ class Dexbi(commands.Cog):
                 {"conversation": "modmail-key-check", "member": person_of(user), "message": "Key check", "author": "staff"}
             )
         except DexbiError as e:
-            return explain(e, self.bot.prefix)
+            return explain(e, self.bot.prefix, bool(self.deployment))
         return None
 
+    # A connected bot gets these from the dashboard. The stored values are for servers set up with `?dexbi key`.
     def ticket_settings(self):
         return {**TICKET_SETTINGS, "teamWaitMinutes": self.config.get("wait", DEFAULT_WAIT)}
+
+    def replies_anonymously(self):
+        if self.deployment:
+            return self.deployment.get("replyAs") == "anonymous"
+        return self.config.get("anonymous", False)
+
+    def handover_roles(self, guild):
+        ids = self.deployment.get("handoverRoleIds", []) if self.deployment else [self.config.get("role_id")]
+        return [role for role in (guild.get_role(int(i)) for i in ids if i) if role]
 
     async def ask(self, thread, body):
         try:
             return await self.call_api({"conversation": conversation_of(thread), "settings": self.ticket_settings(), **body})
         except DexbiError as e:
-            await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explain(e, self.bot.prefix))
+            explanation = explain(e, self.bot.prefix, bool(self.deployment))
+            await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explanation)
             return None
 
     async def note_failure(self, thread, kind, title, text):
@@ -376,7 +432,7 @@ class Dexbi(commands.Cog):
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            sent = await thread.reply(msg, anonymous=self.config.get("anonymous", False))
+            sent = await thread.reply(msg, anonymous=self.replies_anonymously())
         if files and not attachments:
             await self.send_files(thread, files)
         elif len(attachments) > 1 and not await self.add_to_gallery(sent, attachments):
@@ -438,11 +494,12 @@ class Dexbi(commands.Cog):
                 pass
 
     async def alert_staff(self, thread, staff_note):
-        role = thread.channel.guild.get_role(self.config.get("role_id") or 0)
+        roles = self.handover_roles(thread.channel.guild)
         embed = make_embed("Dexbi handed this thread to your team", staff_note or None)
         embed.set_footer(text="Dexbi stays quiet in this thread now.")
-        mentions = discord.AllowedMentions(everyone=False, users=False, roles=[role] if role else False)
-        await thread.channel.send(role.mention if role else None, embed=embed, allowed_mentions=mentions)
+        mentions = discord.AllowedMentions(everyone=False, users=False, roles=roles or False)
+        content = " ".join(role.mention for role in roles) or None
+        await thread.channel.send(content, embed=embed, allowed_mentions=mentions)
 
     async def rename(self, thread, title):
         channel = thread.channel
@@ -462,42 +519,42 @@ class Dexbi(commands.Cog):
         p = ctx.prefix
         if not self.config.get("key"):
             return self.setup_embed(ctx)
+        await self.check_in()
         problem = await self.check_key(ctx.author)
-        role = ctx.guild.get_role(self.config.get("role_id") or 0) if ctx.guild else None
+        roles = self.handover_roles(ctx.guild) if ctx.guild else []
+        connection = f"Connected to **{self.deployment.get('name')}**" if self.deployment else "Manual API key"
         embed = make_embed("Dexbi", "Dexbi answers your members in Modmail threads.")
-        embed.add_field(name="Status", value="On" if self.config.get("enabled", True) else f"Off (`{p}dexbi on`)")
-        embed.add_field(name="API key", value=f"Not working: {problem}" if problem else "Working")
-        embed.add_field(name="Hand-over ping", value=role.mention if role else "No one")
-        embed.add_field(name="Replies as", value="Anonymous staff" if self.config.get("anonymous") else "The bot")
-        embed.add_field(name="Waits for staff", value=f"{self.config.get('wait', DEFAULT_WAIT)} min")
+        embed.add_field(name="Connection", value=connection)
+        embed.add_field(name="Check", value=f"Not working: {problem}" if problem else "Working")
+        embed.add_field(name="Replies as", value="Anonymous staff" if self.replies_anonymously() else "The bot")
+        embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
         embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
         embed.add_field(
             name="Commands",
             value="\n".join(
                 [
-                    f"`{p}dexbi key <key>` set your API key",
-                    f"`{p}dexbi on` / `{p}dexbi off` turn Dexbi on or off",
-                    f"`{p}dexbi role @Support` ping a role on hand-over (`none` to stop)",
-                    f"`{p}dexbi style bot` / `anonymous` how replies look",
-                    f"`{p}dexbi wait 5` minutes to give staff to reply before Dexbi answers",
+                    f"`{p}dexbi connect <code>` connect to your Dexbi dashboard",
                     f"`{p}dexbi test How do refunds work?` try an answer here",
                     f"`{p}dexbi pause` / `{p}dexbi resume` stop or restart Dexbi in one thread",
                     f"`{p}dexbi setup` the setup steps",
+                    f"`{p}dexbi key <key>` use an API key instead",
                 ]
             ),
             inline=False,
         )
+        embed.set_footer(text="Change how Dexbi answers in the Dexbi dashboard, under Deploy.")
         return embed
 
     def setup_embed(self, ctx):
         p = ctx.prefix
         return make_embed(
             "Set up Dexbi",
-            f"1. Open the [Dexbi dashboard]({DASHBOARD_URL}), go to **Settings > API keys** and create a key.\n"
-            f"2. Run `{p}dexbi key <your key>` here. Your message gets deleted right away.\n"
+            f"1. Open the [Dexbi dashboard]({DASHBOARD_URL}), go to **Deploy** and click **New** under Ticket agent. "
+            f"Pick **Modmail**.\n"
+            f"2. Run the `{p}dexbi connect <code>` command it shows here.\n"
             f"3. Done. Dexbi answers new messages in your Modmail threads.\n\n"
-            f"Run `{p}dexbi` any time to see the status and all commands.",
+            f"Using an API key instead? Run `{p}dexbi key <key>`.",
         )
 
     async def cog_command_error(self, ctx, error):
@@ -549,7 +606,7 @@ class Dexbi(commands.Cog):
             warning = ""
         except discord.HTTPException:
             warning = "\n\nI couldn't delete your message. Please delete it yourself, the key is secret."
-        await self.save(key=key.strip())
+        await self.save(key=key.strip(), deployment=None)
         problem = await self.check_key(ctx.author)
         if problem:
             embed = make_embed("Key saved, but it doesn't work", f"{problem}{warning}")
@@ -557,56 +614,20 @@ class Dexbi(commands.Cog):
             embed = make_embed("You're all set", f"Dexbi now answers in your Modmail threads.{warning}")
         await ctx.send(embed=embed)
 
-    @dexbi.command(name="on")
+    @dexbi.command(name="connect")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_on(self, ctx):
-        """Turn Dexbi on."""
-        await self.save(enabled=True)
-        if self.config.get("key"):
-            await ctx.send(embed=make_embed("Dexbi is on", "Dexbi answers in your Modmail threads."))
-        else:
-            await ctx.send(embed=self.setup_embed(ctx))
-
-    @dexbi.command(name="off")
-    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_off(self, ctx):
-        """Turn Dexbi off."""
-        await self.save(enabled=False)
-        await ctx.send(embed=make_embed("Dexbi is off", f"Turn it back on with `{ctx.prefix}dexbi on`."))
-
-    @dexbi.command(name="role")
-    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_role(self, ctx, role: typing.Union[discord.Role, typing.Literal["none"]]):
-        """Role to ping when Dexbi hands a thread over, or none."""
-        if role == "none":
-            await self.save(role_id=None)
-            await ctx.send(embed=make_embed("Hand-over ping off", "Dexbi won't ping anyone on a hand-over."))
-        else:
-            await self.save(role_id=role.id)
-            await ctx.send(embed=make_embed("Hand-over ping set", f"Dexbi pings {role.mention} on a hand-over."))
-
-    @dexbi.command(name="style")
-    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_style(self, ctx, style: typing.Literal["bot", "anonymous"]):
-        """Reply as the bot or as anonymous staff."""
-        await self.save(anonymous=style == "anonymous")
-        await ctx.send(embed=make_embed("Reply style saved", f"Dexbi replies as {'anonymous staff' if style == 'anonymous' else 'the bot'}."))
-
-    @dexbi.command(name="anon", hidden=True)
-    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_anon(self, ctx, setting: typing.Literal["on", "off"]):
-        """Same as style: on is anonymous, off is bot."""
-        await self.dexbi_style.callback(self, ctx, "anonymous" if setting == "on" else "bot")
-
-    @dexbi.command(name="wait")
-    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def dexbi_wait(self, ctx, minutes: int):
-        """Minutes to give staff to reply before Dexbi answers (1 to 60)."""
-        if not 1 <= minutes <= 60:
-            raise commands.BadArgument("Pick 1 to 60 minutes.")
-        await self.save(wait=minutes)
-        text = f"When staff replied last in a thread, Dexbi gives them {minutes} min to reply before it answers."
-        await ctx.send(embed=make_embed("Wait saved", text))
+    async def dexbi_connect(self, ctx, *, code: str):
+        """Connect to Dexbi with the code from the dashboard (Deploy > New > Modmail)."""
+        try:
+            connected = await self.call("POST", "modmail/connect", {"code": code}, auth=False)
+        except DexbiError as e:
+            return await ctx.send(embed=make_embed("Couldn't connect", explain(e, ctx.prefix)))
+        await self.save(key=connected["key"], deployment=connected["deployment"])
+        text = (
+            f"Dexbi now answers in your Modmail threads as **{connected['deployment']['name']}**. "
+            f"Change how it answers in the [Dexbi dashboard]({DASHBOARD_URL}) under **Deploy**."
+        )
+        await ctx.send(embed=make_embed("Connected", text))
 
     @dexbi.command(name="test")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
@@ -625,7 +646,7 @@ class Dexbi(commands.Cog):
                     }
                 )
             except DexbiError as e:
-                return await ctx.send(embed=make_embed("Dexbi couldn't answer", explain(e, ctx.prefix)))
+                return await ctx.send(embed=make_embed("Dexbi couldn't answer", explain(e, ctx.prefix, bool(self.deployment))))
         text = to_embed_text(answer.get("message") or "") or "*(no message)*"
         embed = make_embed("Test answer", split_text(text)[0])
         embed.add_field(name="Action", value=answer.get("action", "none"))
