@@ -3,6 +3,7 @@ import copy
 import re
 import typing
 import uuid
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -30,7 +31,8 @@ TICKET_SETTINGS = {
 }
 
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
-IMAGE = re.compile(r"!\[([^\]]*)\]\((\S+?)\)")
+IMAGE = re.compile(r"!\[([^\]]*)\]\((\S+?)(?:\s+\"[^\"]*\")?\)")
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 RULE = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
 TABLE_DIVIDER = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 
@@ -43,6 +45,17 @@ def table_lines(rows):
             return [", ".join(f"**{h}:** {v}" for h, v in zip(header, row)) for row in body]
         cells = [header] + body
     return [" | ".join(row) for row in cells]
+
+
+def shows_inline(url):
+    # Modmail only embeds links that end like an image file
+    return urlsplit(url).path.lower().endswith(IMAGE_TYPES)
+
+
+def image_link(match):
+    if shows_inline(match.group(2)):
+        return ""
+    return f"[{match.group(1) or 'Image'}]({match.group(2)})"
 
 
 def to_embed_text(markdown):
@@ -62,14 +75,14 @@ def to_embed_text(markdown):
         elif HEADING.match(line):
             lines.append(f"**{HEADING.match(line).group(1).replace('**', '')}**")
         elif not RULE.match(line):
-            lines.append(IMAGE.sub(lambda m: f"[{m.group(1) or 'Image'}]({m.group(2)})", line))
+            lines.append(IMAGE.sub(image_link, line).rstrip())
     if table:
         lines += table_lines(table)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def image_urls(markdown):
-    return [m.group(2) for m in IMAGE.finditer(markdown)]
+    return [m.group(2) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
 
 
 def split_text(text, limit=EMBED_LIMIT):
@@ -80,6 +93,18 @@ def split_text(text, limit=EMBED_LIMIT):
         if cut > 0:
             return [text[:cut].rstrip()] + split_text(text[cut:].lstrip(), limit)
     return [text[:limit]] + split_text(text[limit:], limit)
+
+
+async def reload_images(messages):
+    # Discord sometimes fails to load a linked image the first time it sees it, leaving an empty
+    # image. Editing the embed back in makes it fetch again (by then it's usually cached).
+    await asyncio.sleep(1)
+    for message in messages:
+        if message and message.embeds and message.embeds[0].image.url and not message.embeds[0].image.width:
+            try:
+                await message.edit(embeds=message.embeds)
+            except discord.HTTPException:
+                pass
 
 
 class DexbiError(Exception):
@@ -97,9 +122,14 @@ def person_of(user):
     return {"id": str(user.id), "name": user.display_name[:100]}
 
 
-def explain(error):
+def explain(error, prefix):
     if error.kind == "invalid_key":
-        return f"{error.detail} Create a new key in the Dexbi dashboard and run `?dexbi key <key>`."
+        return (
+            f"The API key is wrong or was deleted. Create a new one in the [Dexbi dashboard]({DASHBOARD_URL}) "
+            f"under **Settings > API keys**, then run `{prefix}dexbi key <key>`."
+        )
+    if error.kind == "unreachable":
+        return "Dexbi can't be reached right now. It answers again once it's back."
     return error.detail
 
 
@@ -153,24 +183,26 @@ class Dexbi(commands.Cog):
                 {"conversation": "modmail-key-check", "member": person_of(user), "message": "Key check", "author": "staff"}
             )
         except DexbiError as e:
-            return explain(e)
+            return explain(e, self.bot.prefix)
         return None
 
     async def ask(self, thread, body):
         try:
             return await self.call_api({"conversation": conversation_of(thread), "settings": TICKET_SETTINGS, **body})
         except DexbiError as e:
-            await self.note_failure(thread, e.kind, f"Dexbi couldn't answer: {explain(e)}")
+            await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explain(e, self.bot.prefix))
             return None
 
-    async def note_failure(self, thread, kind, text):
-        self.last_error = text
-        logger.warning(text)
+    async def note_failure(self, thread, kind, title, text):
+        self.last_error = f"{title}: {text}"
+        logger.warning(self.last_error)
         noted = self.noted_errors.setdefault(thread.channel.id, set())
         if kind in noted:
             return
         noted.add(kind)
-        await thread.channel.send(embed=make_embed("Dexbi", text))
+        embed = make_embed(title, text)
+        embed.set_footer(text="Only your staff can see this. The member got no reply.")
+        await thread.channel.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
@@ -243,15 +275,19 @@ class Dexbi(commands.Cog):
         images = image_urls(markdown)
         for part in split_text(to_embed_text(markdown)):
             # thread.reply needs a message: reply with a copy authored by the bot user, which has no
-            # roles, so Modmail's footer shows the bot's name. Modmail embeds image links found in content.
+            # roles, so Modmail's footer shows the bot's name. Modmail turns image links in content into
+            # the embed image (and extra embeds for the rest).
             msg = DummyMessage(copy.copy(member_message))
             msg.author = self.bot.user
             msg.channel = thread.channel
-            msg.content = " ".join(url for url in images if url in part) or part
+            msg.content = " ".join(images) or part
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
+            sent = await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
+            if images and isinstance(sent, tuple):
+                await reload_images([*(sent[0] or []), sent[1]])
+            images = []
 
     async def alert_staff(self, thread, staff_note):
         role = thread.channel.guild.get_role(self.config.get("role_id") or 0)
@@ -267,8 +303,12 @@ class Dexbi(commands.Cog):
         self.renamed.add(channel.id)
         try:
             await channel.edit(name=f"{channel.name}-{title}"[:100], reason="Dexbi: thread title")
+        except discord.Forbidden:
+            await self.note_failure(
+                thread, "rename", "Dexbi couldn't rename this thread", "Give the bot the Manage Channels permission."
+            )
         except discord.HTTPException as e:
-            await self.note_failure(thread, "rename", f"Dexbi couldn't rename this thread: {e.text or e}")
+            await self.note_failure(thread, "rename", "Dexbi couldn't rename this thread", e.text or str(e))
 
     async def status_embed(self, ctx):
         p = ctx.prefix
@@ -282,7 +322,7 @@ class Dexbi(commands.Cog):
         embed.add_field(name="Hand-over ping", value=role.mention if role else "No one")
         embed.add_field(name="Replies as", value="Anonymous staff" if self.config.get("anonymous") else "The bot")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
-        embed.add_field(name="Last error", value=self.last_error or "None", inline=False)
+        embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
         embed.add_field(
             name="Commands",
             value="\n".join(
@@ -425,7 +465,7 @@ class Dexbi(commands.Cog):
                     }
                 )
             except DexbiError as e:
-                return await ctx.send(embed=make_embed("Dexbi couldn't answer", explain(e)))
+                return await ctx.send(embed=make_embed("Dexbi couldn't answer", explain(e, ctx.prefix)))
         text = to_embed_text(answer.get("message") or "") or "*(no message)*"
         embed = make_embed("Test answer", split_text(text)[0])
         embed.add_field(name="Action", value=answer.get("action", "none"))

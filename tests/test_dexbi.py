@@ -16,6 +16,13 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def no_wait(seconds):
+    pass
+
+
+dexbi.asyncio.sleep = no_wait
+
+
 class FakeResponse:
     def __init__(self, status, payload):
         self.status, self.payload = status, payload
@@ -68,14 +75,31 @@ class FakeChannel:
         self.name = name
 
 
+class SentMessage:
+    def __init__(self, image_url, width):
+        self.image = SimpleNamespace(url=image_url, width=width if image_url else None)
+        self.embeds = [SimpleNamespace(image=self.image)]
+        self.edits = 0
+
+    async def edit(self, *, embeds):
+        self.edits += 1
+        self.image.width = 1200
+
+
 class FakeThread:
-    def __init__(self):
+    def __init__(self, image_width=1200):
         self.channel = FakeChannel()
         self.replies = []
+        self.sent = []
         self.closed_by = None
+        self.image_width = image_width
 
     async def reply(self, message, content=None, anonymous=False, plain=False):
         self.replies.append(SimpleNamespace(message=message, content=content, anonymous=anonymous))
+        image = message.content if message.content.startswith("https://cdn.") else None
+        dm, copy = SentMessage(image, self.image_width), SentMessage(image, 1200)
+        self.sent += [dm, copy]
+        return [dm], copy
 
     async def close(self, *, closer):
         self.closed_by = closer
@@ -142,6 +166,7 @@ def plugin(config=None, thread=None):
         get_contexts=get_contexts,
         threads=SimpleNamespace(find=find),
         command_perm=lambda name: dexbi.PermissionLevel.ADMINISTRATOR,
+        prefix="?",
     )
     cog = dexbi.Dexbi(bot)
     cog.config = {"key": "dexbi_test", **(config or {})}
@@ -163,12 +188,16 @@ def test_headings_become_bold_lines():
     assert dexbi.to_embed_text("## Refunds\nText\n### **Steps**") == "**Refunds**\nText\n**Steps**"
 
 
-def test_images_become_links():
-    text = "See this:\n![The settings page](https://cdn.example.com/a.png)\n![](https://cdn.example.com/b.png)"
-    assert dexbi.to_embed_text(text) == (
-        "See this:\n[The settings page](https://cdn.example.com/a.png)\n[Image](https://cdn.example.com/b.png)"
-    )
-    assert dexbi.image_urls(text) == ["https://cdn.example.com/a.png", "https://cdn.example.com/b.png"]
+def test_images_are_taken_out_of_the_text_to_be_shown_as_images():
+    text = 'See this:\n![The settings page](https://cdn.example.com/a.webp)\n\n*The page.*\n![](https://cdn.example.com/b.PNG "B")'
+    assert dexbi.to_embed_text(text) == "See this:\n\n*The page.*"
+    assert dexbi.image_urls(text) == ["https://cdn.example.com/a.webp", "https://cdn.example.com/b.PNG"]
+
+
+def test_an_image_modmail_cannot_show_stays_a_link():
+    text = "![Diagram](https://example.com/render?id=4)"
+    assert dexbi.to_embed_text(text) == "[Diagram](https://example.com/render?id=4)"
+    assert dexbi.image_urls(text) == []
 
 
 def test_tables_become_lines():
@@ -260,11 +289,29 @@ def test_reply_goes_to_the_member_as_the_bot_user():
 
 def test_reply_hands_images_to_modmail_to_embed():
     cog, session, thread = plugin()
-    session.answers.append((200, answer("reply", "Open this page:\n![Settings](https://cdn.example.com/s.png)")))
+    reply = "Open this page:\n![Settings](https://cdn.example.com/s.webp)\n![Menu](https://cdn.example.com/m.png)"
+    session.answers.append((200, answer("reply", reply)))
     member_says(cog, thread)
     [sent] = thread.replies
-    assert sent.content == "Open this page:\n[Settings](https://cdn.example.com/s.png)"
-    assert sent.message.content == "https://cdn.example.com/s.png"
+    assert sent.content == "Open this page:"
+    assert sent.message.content == "https://cdn.example.com/s.webp https://cdn.example.com/m.png"
+
+
+def test_an_image_discord_failed_to_load_is_loaded_again():
+    cog, session, thread = plugin(thread=FakeThread(image_width=0))
+    session.answers.append((200, answer("reply", "Here:\n![Deploy](https://cdn.example.com/d.webp)")))
+    member_says(cog, thread)
+    dm, thread_copy = thread.sent
+    assert dm.edits == 1 and dm.image.width == 1200
+    assert thread_copy.edits == 0
+
+
+def test_an_answer_that_is_only_an_image_still_sends_it():
+    cog, session, thread = plugin()
+    session.answers.append((200, answer("reply", "![Deploy](https://cdn.example.com/d.webp)")))
+    member_says(cog, thread)
+    [sent] = thread.replies
+    assert sent.content == "" and sent.message.content == "https://cdn.example.com/d.webp"
 
 
 def test_a_long_reply_is_sent_in_parts():
@@ -272,6 +319,7 @@ def test_a_long_reply_is_sent_in_parts():
     session.answers.append((200, answer("reply", ("a" * 3000) + "\n\n" + ("b" * 3000))))
     member_says(cog, thread)
     assert [r.content[0] for r in thread.replies] == ["a", "b"]
+    assert all(r.message.content == r.content for r in thread.replies)
 
 
 def test_reply_follows_the_style_setting():
@@ -332,18 +380,41 @@ def test_a_failure_is_told_to_staff_once_per_kind_and_never_to_the_member():
     session.answers += [bad_key, bad_key, limit]
     for _ in range(3):
         member_says(cog, thread)
-    notes = [sent.embed.description for sent in thread.channel.sent]
-    assert len(notes) == 2
-    assert notes[0].startswith("Dexbi couldn't answer: Missing or invalid API key.") and "?dexbi key" in notes[0]
-    assert "used up" in notes[1]
-    assert thread.replies == [] and cog.last_error == notes[1]
+    notes = [sent.embed for sent in thread.channel.sent]
+    assert [note.title for note in notes] == ["Dexbi couldn't answer", "Dexbi couldn't answer"]
+    assert "Settings > API keys" in notes[0].description and "`?dexbi key <key>`" in notes[0].description
+    assert "used up" in notes[1].description
+    assert thread.replies == [] and cog.last_error.endswith(notes[1].description)
+
+
+def test_dexbi_being_down_says_it_will_answer_again():
+    cog, session, thread = plugin()
+
+    def down(*args, **kwargs):
+        raise dexbi.aiohttp.ClientConnectionError()
+
+    session.post = down
+    member_says(cog, thread)
+    assert "answers again once it's back" in thread.channel.sent[0].embed.description
+
+
+def test_a_rename_without_manage_channels_says_what_to_fix():
+    cog, session, thread = plugin()
+
+    async def forbidden(**kwargs):
+        raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+
+    thread.channel.edit = forbidden
+    session.answers.append((200, answer("none", title="refund")))
+    member_says(cog, thread)
+    assert thread.channel.sent[0].embed.description == "Give the bot the Manage Channels permission."
 
 
 def test_an_unreadable_answer_is_a_failure_not_a_crash():
     cog, session, thread = plugin()
     session.answers.append((502, "<html>Bad gateway</html>"))
     member_says(cog, thread)
-    assert thread.channel.sent[0].embed.description == "Dexbi couldn't answer: Dexbi answered with HTTP 502."
+    assert thread.channel.sent[0].embed.description == "Dexbi answered with HTTP 502."
 
 
 def test_closing_a_thread_forgets_it():
@@ -373,7 +444,7 @@ def test_status_says_when_the_key_does_not_work():
     session.answers.append((401, {"error": {"code": "invalid_key", "message": "Bad key."}}))
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi_status.callback(cog, ctx))
-    assert {f.name: f.value for f in ctx.embed.fields}["API key"].startswith("Not working: Bad key.")
+    assert {f.name: f.value for f in ctx.embed.fields}["API key"].startswith("Not working: The API key is wrong")
 
 
 def test_without_a_key_status_shows_the_setup_steps():

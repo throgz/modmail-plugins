@@ -28,6 +28,8 @@ Needs a self-hosted [Modmail](https://github.com/modmail-dev/modmail) bot, v4 or
 ## Notes
 
 - Each answer from Dexbi counts as one AI reply on your Dexbi plan. Staff messages are free.
+- When your plan's AI replies for the month run out, Dexbi stays quiet until they reset.
+- Screenshots from your Dexbi documents show up as images in the reply.
 - If something goes wrong (bad key, plan limit), the member sees nothing and staff get one note in the thread.
 - Docs: https://docs.dexbi.app/tutorials/modmail
 
