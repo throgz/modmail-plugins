@@ -30,6 +30,9 @@ class FakeResponse:
     async def json(self, content_type=None):
         return self.payload
 
+    async def read(self):
+        return self.payload
+
     async def __aenter__(self):
         return self
 
@@ -41,6 +44,10 @@ class FakeSession:
     def __init__(self):
         self.requests = []
         self.answers = []
+
+    def get(self, url, *, timeout):
+        self.requests.append({"url": url})
+        return FakeResponse(404 if "missing" in url else 200, b"png-bytes")
 
     def post(self, url, *, json, headers, timeout):
         self.requests.append({"url": url, "body": json, "headers": headers})
@@ -68,38 +75,22 @@ class FakeChannel:
         self.id, self.name, self.guild = channel_id, "alex", GUILD
         self.sent = []
 
-    async def send(self, content=None, embed=None, allowed_mentions=None):
-        self.sent.append(SimpleNamespace(content=content, embed=embed, mentions=allowed_mentions))
+    async def send(self, content=None, embed=None, allowed_mentions=None, files=None):
+        self.sent.append(SimpleNamespace(content=content, embed=embed, mentions=allowed_mentions, files=files))
 
     async def edit(self, *, name, reason=None):
         self.name = name
 
 
-class SentMessage:
-    def __init__(self, image_url, width):
-        self.image = SimpleNamespace(url=image_url, width=width if image_url else None)
-        self.embeds = [SimpleNamespace(image=self.image)]
-        self.edits = 0
-
-    async def edit(self, *, embeds):
-        self.edits += 1
-        self.image.width = 1200
-
-
 class FakeThread:
-    def __init__(self, image_width=1200):
+    def __init__(self):
         self.channel = FakeChannel()
+        self.recipient = FakeChannel(901)
         self.replies = []
-        self.sent = []
         self.closed_by = None
-        self.image_width = image_width
 
     async def reply(self, message, content=None, anonymous=False, plain=False):
         self.replies.append(SimpleNamespace(message=message, content=content, anonymous=anonymous))
-        image = message.content if message.content.startswith("https://cdn.") else None
-        dm, copy = SentMessage(image, self.image_width), SentMessage(image, 1200)
-        self.sent += [dm, copy]
-        return [dm], copy
 
     async def close(self, *, closer):
         self.closed_by = closer
@@ -287,31 +278,34 @@ def test_reply_goes_to_the_member_as_the_bot_user():
     assert sent.message.stickers == [] and sent.message.attachments == []
 
 
-def test_reply_hands_images_to_modmail_to_embed():
+def test_images_go_after_the_reply_as_attachments_with_no_gap():
     cog, session, thread = plugin()
-    reply = "Open this page:\n![Settings](https://cdn.example.com/s.webp)\n![Menu](https://cdn.example.com/m.png)"
+    reply = "**Steps**\n\n![Deploy](https://cdn.example.com/d.webp)\n\n1. Open Deploy.\n\n![Menu](https://cdn.example.com/m.png)"
     session.answers.append((200, answer("reply", reply)))
     member_says(cog, thread)
     [sent] = thread.replies
-    assert sent.content == "Open this page:"
-    assert sent.message.content == "https://cdn.example.com/s.webp https://cdn.example.com/m.png"
+    assert sent.content == "**Steps**\n\n1. Open Deploy."
+    for target in (thread.recipient, thread.channel):
+        [files] = [m.files for m in target.sent if m.files]
+        assert [f.filename for f in files] == ["d.webp", "m.png"]
 
 
-def test_an_image_discord_failed_to_load_is_loaded_again():
-    cog, session, thread = plugin(thread=FakeThread(image_width=0))
-    session.answers.append((200, answer("reply", "Here:\n![Deploy](https://cdn.example.com/d.webp)")))
+def test_an_image_that_cannot_be_downloaded_is_skipped():
+    cog, session, thread = plugin()
+    session.answers.append((200, answer("reply", "Here:\n![Gone](https://cdn.example.com/missing.png)")))
     member_says(cog, thread)
-    dm, thread_copy = thread.sent
-    assert dm.edits == 1 and dm.image.width == 1200
-    assert thread_copy.edits == 0
+    [sent] = thread.replies
+    assert sent.content == "Here:"
+    assert not [m for m in thread.recipient.sent + thread.channel.sent if m.files]
 
 
-def test_an_answer_that_is_only_an_image_still_sends_it():
+def test_an_answer_that_is_only_an_image_sends_just_the_image():
     cog, session, thread = plugin()
     session.answers.append((200, answer("reply", "![Deploy](https://cdn.example.com/d.webp)")))
     member_says(cog, thread)
-    [sent] = thread.replies
-    assert sent.content == "" and sent.message.content == "https://cdn.example.com/d.webp"
+    assert thread.replies == []
+    [files] = [m.files for m in thread.recipient.sent if m.files]
+    assert [f.filename for f in files] == ["d.webp"]
 
 
 def test_a_long_reply_is_sent_in_parts():

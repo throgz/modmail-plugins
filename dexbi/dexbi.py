@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import io
 import re
 import typing
 import uuid
@@ -17,6 +18,7 @@ logger = getLogger(__name__)
 API_URL = "https://api.dexbi.app/v1/messages"
 DASHBOARD_URL = "https://dash.dexbi.app"
 TIMEOUT = aiohttp.ClientTimeout(total=60)
+MAX_IMAGES = 4
 MAX_MESSAGE_CHARS = 4000
 EMBED_LIMIT = 4096
 COLOR = 0x3ECF8E
@@ -75,7 +77,9 @@ def to_embed_text(markdown):
         elif HEADING.match(line):
             lines.append(f"**{HEADING.match(line).group(1).replace('**', '')}**")
         elif not RULE.match(line):
-            lines.append(IMAGE.sub(image_link, line).rstrip())
+            text = IMAGE.sub(image_link, line).rstrip()
+            if text or not IMAGE.search(line):
+                lines.append(text)
     if table:
         lines += table_lines(table)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -93,18 +97,6 @@ def split_text(text, limit=EMBED_LIMIT):
         if cut > 0:
             return [text[:cut].rstrip()] + split_text(text[cut:].lstrip(), limit)
     return [text[:limit]] + split_text(text[limit:], limit)
-
-
-async def reload_images(messages):
-    # Discord sometimes fails to load a linked image the first time it sees it, leaving an empty
-    # image. Editing the embed back in makes it fetch again (by then it's usually cached).
-    await asyncio.sleep(1)
-    for message in messages:
-        if message and message.embeds and message.embeds[0].image.url and not message.embeds[0].image.width:
-            try:
-                await message.edit(embeds=message.embeds)
-            except discord.HTTPException:
-                pass
 
 
 class DexbiError(Exception):
@@ -272,22 +264,42 @@ class Dexbi(commands.Cog):
             await thread.close(closer=thread.channel.guild.me)
 
     async def reply(self, thread, member_message, markdown):
-        images = image_urls(markdown)
-        for part in split_text(to_embed_text(markdown)):
+        text = to_embed_text(markdown)
+        for part in split_text(text) if text else []:
             # thread.reply needs a message: reply with a copy authored by the bot user, which has no
-            # roles, so Modmail's footer shows the bot's name. Modmail turns image links in content into
-            # the embed image (and extra embeds for the rest).
+            # roles, so Modmail's footer shows the bot's name
             msg = DummyMessage(copy.copy(member_message))
             msg.author = self.bot.user
             msg.channel = thread.channel
-            msg.content = " ".join(images) or part
+            msg.content = part
+            msg.attachments = []
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            sent = await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
-            if images and isinstance(sent, tuple):
-                await reload_images([*(sent[0] or []), sent[1]])
-            images = []
+            await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
+        await self.send_images(thread, image_urls(markdown))
+
+    async def send_images(self, thread, urls):
+        # embeds can't show images mid-text, so screenshots go after the reply as plain attachments
+        files = []
+        for url in urls[:MAX_IMAGES]:
+            try:
+                async with self.bot.session.get(url, timeout=TIMEOUT) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.read()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+            files.append((urlsplit(url).path.rsplit("/", 1)[-1] or "image.png", data))
+        if not files:
+            return
+        for target in (thread.recipient, thread.channel):
+            if target is None:
+                continue
+            try:
+                await target.send(files=[discord.File(io.BytesIO(data), filename=name) for name, data in files])
+            except discord.HTTPException:
+                pass
 
     async def alert_staff(self, thread, staff_note):
         role = thread.channel.guild.get_role(self.config.get("role_id") or 0)
