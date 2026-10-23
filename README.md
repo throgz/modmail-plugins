@@ -16,6 +16,14 @@ How Dexbi answers is set in the dashboard, on your Modmail deployment: when it r
 
 Rather use an API key? Create one under **Settings > API keys** and run `?dexbi key <your key>` instead of `connect`.
 
+## Updating
+
+```
+?plugins update throgz/modmail-plugins/dexbi
+```
+
+`?dexbi` shows which version you have, and your Modmail deployment in the dashboard says when a newer one is out. Running `?plugins add throgz/modmail-plugins/dexbi` again also updates it (from 1.1.0 on).
+
 ## Commands
 
 | Command | Description |

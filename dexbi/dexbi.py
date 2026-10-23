@@ -12,6 +12,8 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
+__version__ = "1.1.0"
+
 logger = getLogger(__name__)
 
 API_URL = "https://api.dexbi.app/v1"
@@ -23,6 +25,7 @@ EMBED_LIMIT = 4096
 COLOR = 0x3ECF8E
 DEFAULT_WAIT = 5
 CHECK_IN_SECONDS = 600
+PLUGIN_PATH = "throgz/modmail-plugins/dexbi"
 
 TICKET_SETTINGS = {
     "agent": "ticket",
@@ -198,6 +201,26 @@ def make_embed(title, description=None):
     return discord.Embed(title=title, description=description, color=COLOR)
 
 
+def invoked_command(ctx):
+    """The command a message runs, down to its subcommand (`plugins add`)."""
+    command = ctx.command
+    while isinstance(command, commands.Group):
+        ctx.view.skip_ws()
+        subcommand = command.get_command(ctx.view.get_word())
+        if subcommand is None:
+            break
+        command = subcommand
+    return command
+
+
+def installed_entry(installed, typed):
+    """The installed plugin `?plugins add <typed>` names when it's this one, read the way Modmail reads it."""
+    name = typed.strip()
+    if "@" not in name:
+        name += "@master"
+    return name if name in installed and name.split("@", 1)[0] == PLUGIN_PATH else None
+
+
 class Dexbi(commands.Cog):
     """Dexbi answers your members in Modmail threads."""
 
@@ -238,7 +261,9 @@ class Dexbi(commands.Cog):
         await self.db.update_one({"_id": "config"}, {"$set": changes}, upsert=True)
 
     async def call(self, method, path, body=None, auth=True):
-        headers = {"Authorization": f"Bearer {self.config.get('key', '')}"} if auth else {}
+        headers = {"X-Dexbi-Plugin": f"modmail/{__version__}"}
+        if auth:
+            headers["Authorization"] = f"Bearer {self.config.get('key', '')}"
         try:
             async with self.bot.session.request(
                 method, f"{API_URL}/{path}", json=body, headers=headers, timeout=TIMEOUT
@@ -320,6 +345,32 @@ class Dexbi(commands.Cog):
         embed = make_embed(title, text)
         embed.set_footer(text="Only your staff can see this. The member got no reply.")
         await thread.channel.send(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # Adding the plugin again only gets "This plugin is already installed." from Modmail.
+        # Update it then, so step one of the setup always leaves the newest version.
+        if message.author.bot or message.guild is None:
+            return
+        for ctx in await self.bot.get_contexts(message):
+            if getattr(invoked_command(ctx), "qualified_name", None) == "plugins add":
+                return await self.update_when_added_again(ctx)
+
+    async def update_when_added_again(self, ctx):
+        installed = installed_entry(self.bot.config["plugins"], ctx.view.read_rest())
+        update = self.bot.get_command("plugins update")
+        if installed is None or update is None:
+            return
+        try:
+            if not await update.can_run(ctx):
+                return
+        except commands.CommandError:
+            return
+        # Modmail's own update reloads this cog; nothing here runs after it
+        try:
+            await ctx.invoke(update, plugin_name=installed)
+        except Exception:
+            logger.warning("Updating the Dexbi plugin failed.", exc_info=True)
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
@@ -534,6 +585,7 @@ class Dexbi(commands.Cog):
         embed.add_field(name="Replies as", value="Anonymous staff" if self.replies_anonymously() else "The bot")
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
+        embed.add_field(name="Plugin", value=f"v{__version__}")
         # what's wrong now says how to fix it; otherwise show the last thing that went wrong
         if error:
             embed.add_field(name="What to do", value=explain(error, p, bool(self.deployment))[:1024], inline=False)

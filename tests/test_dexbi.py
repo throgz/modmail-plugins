@@ -642,7 +642,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.1.0"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -720,6 +720,14 @@ def test_checking_in_quietly_skips_an_older_dexbi_and_notes_a_dead_key():
     assert thread.channel.sent == []
 
 
+def test_every_call_says_which_plugin_version_it_is():
+    cog, session, thread = plugin({"deployment": deployment()})
+    run(cog.check_in())
+    member_says(cog, thread)
+    assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
+    assert dexbi.__version__ == "1.1.0"
+
+
 def test_without_a_key_there_is_no_check_in():
     cog, session, thread = plugin({"key": None})
     run(cog.check_in())
@@ -739,6 +747,7 @@ def test_status_shows_the_connection_settings_and_commands():
     assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "Anonymous staff"
     assert "?dexbi connect" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
     assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
+    assert fields["Plugin"] == "v1.1.0"
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[1]["body"]["author"] == "staff"
 
@@ -872,3 +881,117 @@ def test_a_link_to_a_screenshot_is_attached_not_shown_as_an_address():
     assert dexbi.to_embed_text(reply) == "Here's the New button:\nThen click it."
     assert dexbi.named_images(reply) == [("screenshot-1.webp", url)]
 
+
+
+# adding the plugin again
+
+
+INSTALLED = "throgz/modmail-plugins/dexbi@master"
+
+
+class ModmailPlugins:
+    """Modmail's `plugins` group as far as this matters: add and update, behind a permission check."""
+
+    def __init__(self, allowed=True):
+        self.updated, self.checked = [], []
+
+        async def plugins(ctx):
+            pass
+
+        async def add(ctx, *, plugin_name):
+            pass
+
+        async def update(ctx, *, plugin_name=None):
+            self.updated.append(plugin_name)
+
+        def permission(ctx):
+            # Modmail's check reads the level of the command being checked
+            self.checked.append(ctx.command.qualified_name)
+            return allowed
+
+        self.group = commands.Group(plugins, name="plugins", aliases=["plugin"])
+        self.group.add_command(commands.Command(add, name="add", aliases=["install", "load"]))
+        self.group.add_command(commands.Command(update, name="update", checks=[permission]))
+
+    def install(self, cog, installed=(INSTALLED,)):
+        bot = cog.bot
+        bot.config = {"plugins": list(installed)}
+        bot.get_command = lambda name: self.group.get_command(name.split(" ", 1)[1])
+
+        async def can_run(ctx, call_once=False):
+            return True
+
+        async def contexts(message):
+            # Modmail resolves the prefix and the first word; the subcommand is left in the view
+            view = StringView(message.content)
+            ctx = commands.Context(prefix="?", view=view, bot=bot, message=message)
+            if view.skip_string("?"):
+                word = view.get_word().lower()
+                ctx.command = self.group if word in ("plugins", "plugin") else None
+            return [ctx]
+
+        bot.can_run = can_run
+        bot.get_contexts = contexts
+
+
+def server_message(content, bot_author=False):
+    return SimpleNamespace(
+        id=778, content=content, author=SimpleNamespace(id=7, bot=bot_author), guild=GUILD, channel=FakeChannel(1),
+        _state=None,
+    )
+
+
+def test_adding_the_plugin_again_runs_modmails_update_for_it():
+    for typed in ("throgz/modmail-plugins/dexbi", f"{INSTALLED} ", "plugin install throgz/modmail-plugins/dexbi"):
+        cog, session, thread = plugin()
+        modmail = ModmailPlugins()
+        modmail.install(cog)
+        content = f"?{typed}" if typed.startswith("plugin ") else f"?plugins add {typed}"
+        run(cog.on_message(server_message(content)))
+        assert modmail.updated == [INSTALLED], typed
+        assert modmail.checked == ["plugins update"]
+
+
+def test_the_update_needs_the_level_modmails_update_needs():
+    cog, session, thread = plugin()
+    modmail = ModmailPlugins(allowed=False)
+    modmail.install(cog)
+    run(cog.on_message(server_message("?plugins add throgz/modmail-plugins/dexbi")))
+    assert modmail.updated == []
+
+
+def test_nothing_else_runs_the_update():
+    cases = [
+        ("?plugins add someone/other-plugins/tickets", [INSTALLED]),
+        ("?plugins add throgz/modmail-plugins/dexbi@dev", [INSTALLED]),
+        ("?plugins add throgz/modmail-plugins/dexbi", ["throgz/modmail-plugins/dexbi@dev"]),
+        ("?plugins add throgz/modmail-plugins/dexbi", []),
+        ("?plugins update throgz/modmail-plugins/dexbi", [INSTALLED]),
+        ("?plugins", [INSTALLED]),
+        ("plugins add throgz/modmail-plugins/dexbi", [INSTALLED]),
+        ("Hi, can I get help?", [INSTALLED]),
+    ]
+    for content, installed in cases:
+        cog, session, thread = plugin()
+        modmail = ModmailPlugins()
+        modmail.install(cog, installed)
+        run(cog.on_message(server_message(content)))
+        assert modmail.updated == [], content
+    cog, session, thread = plugin()
+    modmail = ModmailPlugins()
+    modmail.install(cog)
+    run(cog.on_message(server_message("?plugins add throgz/modmail-plugins/dexbi", bot_author=True)))
+    assert modmail.updated == []
+
+
+def test_an_update_that_fails_is_logged_not_raised(caplog):
+    cog, session, thread = plugin()
+    modmail = ModmailPlugins()
+    modmail.install(cog)
+
+    async def broken(ctx, *, plugin_name=None):
+        raise RuntimeError("download failed")
+
+    modmail.group.get_command("update").callback = broken
+    run(cog.on_message(server_message("?plugins add throgz/modmail-plugins/dexbi")))
+    assert "Updating the Dexbi plugin failed." in caplog.text
