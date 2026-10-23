@@ -101,8 +101,9 @@ class FakeThread:
         self.cards = []
         self.closed_by = None
 
-    async def reply(self, message, content=None, anonymous=False, plain=False):
-        self.replies.append(SimpleNamespace(message=message, content=content, anonymous=anonymous))
+    # Modmail 4.0 and 4.1 take no content argument, so the text rides on the message
+    async def reply(self, message, anonymous=False, plain=False):
+        self.replies.append(SimpleNamespace(message=message, content=message.content, anonymous=anonymous))
         dm, copy = SentCard(), SentCard()
         self.cards += [dm, copy]
         return [dm], copy

@@ -303,7 +303,7 @@ class Dexbi(commands.Cog):
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            sent = await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
+            sent = await thread.reply(msg, anonymous=self.config.get("anonymous", False))
         if files and not attachments:
             await self.send_files(thread, files)
         elif len(attachments) > 1 and not await self.add_to_gallery(sent, attachments):
