@@ -76,7 +76,10 @@ class FakeChannel:
         self.sent = []
 
     async def send(self, content=None, embed=None, allowed_mentions=None, files=None):
-        self.sent.append(SimpleNamespace(content=content, embed=embed, mentions=allowed_mentions, files=files))
+        sent = SimpleNamespace(content=content, embed=embed, mentions=allowed_mentions, files=files,
+                               attachments=[SimpleNamespace(filename=f.filename) for f in files or []])
+        self.sent.append(sent)
+        return sent
 
     async def edit(self, *, name, reason=None):
         self.name = name
@@ -156,6 +159,7 @@ def plugin(config=None, thread=None):
         api=SimpleNamespace(get_plugin_partition=lambda cog: FakeCollection()),
         get_contexts=get_contexts,
         threads=SimpleNamespace(find=find),
+        log_channel=FakeChannel(902),
         command_perm=lambda name: dexbi.PermissionLevel.ADMINISTRATOR,
         prefix="?",
     )
@@ -278,16 +282,28 @@ def test_reply_goes_to_the_member_as_the_bot_user():
     assert sent.message.stickers == [] and sent.message.attachments == []
 
 
-def test_images_go_after_the_reply_as_attachments_with_no_gap():
+def test_images_ride_on_the_reply_like_staff_attachments_with_no_gap():
     cog, session, thread = plugin()
     reply = "**Steps**\n\n![Deploy](https://cdn.example.com/d.webp)\n\n1. Open Deploy.\n\n![Menu](https://cdn.example.com/m.png)"
     session.answers.append((200, answer("reply", reply)))
     member_says(cog, thread)
     [sent] = thread.replies
     assert sent.content == "**Steps**\n\n1. Open Deploy."
+    assert [a.filename for a in sent.message.attachments] == ["d.webp", "m.png"]
+    [upload] = cog.bot.log_channel.sent
+    assert [f.filename for f in upload.files] == ["d.webp", "m.png"]
+
+
+def test_without_a_log_channel_images_are_sent_after_the_reply():
+    cog, session, thread = plugin()
+    cog.bot.log_channel = None
+    session.answers.append((200, answer("reply", "Here:\n![Deploy](https://cdn.example.com/d.webp)")))
+    member_says(cog, thread)
+    [sent] = thread.replies
+    assert sent.message.attachments == []
     for target in (thread.recipient, thread.channel):
         [files] = [m.files for m in target.sent if m.files]
-        assert [f.filename for f in files] == ["d.webp", "m.png"]
+        assert [f.filename for f in files] == ["d.webp"]
 
 
 def test_an_image_that_cannot_be_downloaded_is_skipped():
@@ -295,17 +311,16 @@ def test_an_image_that_cannot_be_downloaded_is_skipped():
     session.answers.append((200, answer("reply", "Here:\n![Gone](https://cdn.example.com/missing.png)")))
     member_says(cog, thread)
     [sent] = thread.replies
-    assert sent.content == "Here:"
-    assert not [m for m in thread.recipient.sent + thread.channel.sent if m.files]
+    assert sent.content == "Here:" and sent.message.attachments == []
+    assert cog.bot.log_channel.sent == []
 
 
-def test_an_answer_that_is_only_an_image_sends_just_the_image():
+def test_an_answer_that_is_only_an_image_sends_it_in_a_reply():
     cog, session, thread = plugin()
     session.answers.append((200, answer("reply", "![Deploy](https://cdn.example.com/d.webp)")))
     member_says(cog, thread)
-    assert thread.replies == []
-    [files] = [m.files for m in thread.recipient.sent if m.files]
-    assert [f.filename for f in files] == ["d.webp"]
+    [sent] = thread.replies
+    assert sent.content == "" and [a.filename for a in sent.message.attachments] == ["d.webp"]
 
 
 def test_a_long_reply_is_sent_in_parts():

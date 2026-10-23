@@ -264,23 +264,26 @@ class Dexbi(commands.Cog):
             await thread.close(closer=thread.channel.guild.me)
 
     async def reply(self, thread, member_message, markdown):
+        files = await self.download_images(image_urls(markdown))
+        attachments = await self.host_images(files)
         text = to_embed_text(markdown)
-        for part in split_text(text) if text else []:
+        parts = split_text(text) if text else [""] if attachments else []
+        for i, part in enumerate(parts):
             # thread.reply needs a message: reply with a copy authored by the bot user, which has no
             # roles, so Modmail's footer shows the bot's name
             msg = DummyMessage(copy.copy(member_message))
             msg.author = self.bot.user
             msg.channel = thread.channel
             msg.content = part
-            msg.attachments = []
+            msg.attachments = attachments if i == len(parts) - 1 else []
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
             await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
-        await self.send_images(thread, image_urls(markdown))
+        if files and not attachments:
+            await self.send_files(thread, files)
 
-    async def send_images(self, thread, urls):
-        # embeds can't show images mid-text, so screenshots go after the reply as plain attachments
+    async def download_images(self, urls):
         files = []
         for url in urls[:MAX_IMAGES]:
             try:
@@ -291,8 +294,24 @@ class Dexbi(commands.Cog):
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 continue
             files.append((urlsplit(url).path.rsplit("/", 1)[-1] or "image.png", data))
-        if not files:
-            return
+        return files
+
+    async def host_images(self, files):
+        # Modmail shows a reply's attachments inside its embed, the same as when staff attach a file.
+        # Upload the screenshots to the log channel so they have Discord links that always load.
+        channel = getattr(self.bot, "log_channel", None)
+        if not files or channel is None:
+            return []
+        try:
+            message = await channel.send(
+                "Screenshots from a Dexbi answer",
+                files=[discord.File(io.BytesIO(data), filename=name) for name, data in files],
+            )
+        except discord.HTTPException:
+            return []
+        return message.attachments
+
+    async def send_files(self, thread, files):
         for target in (thread.recipient, thread.channel):
             if target is None:
                 continue
