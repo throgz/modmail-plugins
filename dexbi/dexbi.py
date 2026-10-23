@@ -168,6 +168,9 @@ class ReplyAuthor:
     def __getattr__(self, name):
         return getattr(self._user, name)
 
+    def __str__(self):
+        return str(self._user)
+
 
 def make_embed(title, description=None):
     return discord.Embed(title=title, description=description, color=COLOR)

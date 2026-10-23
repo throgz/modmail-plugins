@@ -316,6 +316,8 @@ def test_reply_goes_to_the_member_as_the_bot_user():
     author = sent.message.author
     top = sorted(author.roles, key=lambda r: r.position, reverse=True)[0]
     assert author.id == cog.bot.user.id and top.hoist and str(top) == cog.bot.user.display_name
+    # and the name above the reply (Modmail 4.0-4.1 print the author)
+    assert str(author) == str(cog.bot.user)
     assert sent.message.channel is thread.channel
     assert sent.message.stickers == [] and sent.message.attachments == []
 
