@@ -32,7 +32,7 @@ class DummyMessage:
 def _install_core_stubs() -> None:
     core = types.ModuleType("core")
     checks = types.ModuleType("core.checks")
-    checks.has_permissions = lambda level: (lambda command: command)
+    checks.has_permissions = lambda level: (lambda command: setattr(command, "permission_level", level) or command)
     models = types.ModuleType("core.models")
     models.PermissionLevel = PermissionLevel
     models.DummyMessage = DummyMessage

@@ -9,7 +9,7 @@ Works with self-hosted [Modmail](https://github.com/modmail-dev/modmail) v4.0 an
 1. In the [Dexbi dashboard](https://dash.dexbi.app), open **Deploy** and click **New** under Ticket agent. Pick **Modmail**.
 2. Run the two commands the dashboard shows in your Modmail server:
    - `?plugins add throgz/modmail-plugins/dexbi`
-   - `?dexbi connect <code>` (the code works once and runs out after a while; the dashboard always shows a fresh one)
+   - `?dexbi connect <code>` (the code works once and runs out after 15 minutes; the dashboard always shows a fresh one, and the plugin deletes your message)
 3. The dashboard shows **Connected**. Dexbi now answers new messages in your Modmail threads.
 
 How Dexbi answers is set in the dashboard, on your Modmail deployment: when it replies, how long it waits for staff, hand-overs and who gets pinged, Smart close, Smart rename, and whether it replies as the bot or as anonymous staff. Changes apply right away, no command needed.

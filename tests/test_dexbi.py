@@ -649,6 +649,47 @@ def test_connect_saves_the_key_and_the_deployment():
     assert session.requests[-1]["headers"]["Authorization"] == "Bearer dexbi_connected"
 
 
+def test_connect_deletes_the_message_with_the_code():
+    cog, session, thread = plugin({"key": None})
+    session.answers.append((200, {"key": "dexbi_connected", "deployment": deployment()}))
+    ctx = FakeContext(FakeChannel(1), command="dexbi connect")
+    run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
+    assert ctx.message.deleted and "delete it yourself" not in ctx.embed.description
+
+    async def forbidden():
+        raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+
+    ctx.message.delete = forbidden
+    session.answers.append((200, {"key": "dexbi_connected", "deployment": deployment()}))
+    run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
+    assert "Please delete it yourself, the code is secret." in ctx.embed.description
+
+
+def test_connect_and_key_need_the_administrator_level():
+    for command in (dexbi.Dexbi.dexbi_connect, dexbi.Dexbi.dexbi_key, dexbi.Dexbi.dexbi_test):
+        assert command.callback.permission_level == dexbi.PermissionLevel.ADMINISTRATOR
+
+
+def test_the_key_and_the_code_never_show_up_in_errors(caplog):
+    cog, session, thread = plugin({"key": None})
+    session.answers.append((400, {"error": {"code": "invalid_code", "message": "That code didn't work."}}))
+    ctx = FakeContext(FakeChannel(1), command="dexbi connect")
+    run(cog.dexbi_connect.callback(cog, ctx, code="SECRET-CODE"))
+
+    cog.config.update(key="dexbi_secretkey", deployment=deployment())
+    session.answers.append((401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}}))
+    run(cog.check_in())
+
+    def down(*args, **kwargs):
+        raise dexbi.aiohttp.ClientConnectionError()
+
+    session.request = down
+    run(cog.check_in())
+    member_says(cog, thread)
+    shown = [caplog.text, cog.last_error, *(e.description for e in ctx.sent), *(m.embed.description for m in thread.channel.sent)]
+    assert not any("SECRET-CODE" in text or "secretkey" in text for text in shown)
+
+
 def test_a_bad_code_says_why():
     cog, session, thread = plugin({"key": None})
     message = "That code didn't work. Get a new one in the Dexbi dashboard."

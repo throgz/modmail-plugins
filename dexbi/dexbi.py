@@ -573,6 +573,13 @@ class Dexbi(commands.Cog):
         else:
             await self.bot.on_command_error(ctx, error, unhandled_by_cog=True)
 
+    async def delete_command(self, ctx, secret):
+        try:
+            await ctx.message.delete()
+            return ""
+        except discord.HTTPException:
+            return f"\n\nI couldn't delete your message. Please delete it yourself, the {secret} is secret."
+
     async def thread_here(self, ctx):
         thread = await self.bot.threads.find(channel=ctx.channel)
         if thread is None:
@@ -601,11 +608,7 @@ class Dexbi(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def dexbi_key(self, ctx, key: str):
         """Set your Dexbi API key."""
-        try:
-            await ctx.message.delete()
-            warning = ""
-        except discord.HTTPException:
-            warning = "\n\nI couldn't delete your message. Please delete it yourself, the key is secret."
+        warning = await self.delete_command(ctx, "key")
         await self.save(key=key.strip(), deployment=None)
         problem = await self.check_key(ctx.author)
         if problem:
@@ -618,14 +621,15 @@ class Dexbi(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def dexbi_connect(self, ctx, *, code: str):
         """Connect to Dexbi with the code from the dashboard (Deploy > New > Modmail)."""
+        warning = await self.delete_command(ctx, "code")
         try:
             connected = await self.call("POST", "modmail/connect", {"code": code}, auth=False)
         except DexbiError as e:
-            return await ctx.send(embed=make_embed("Couldn't connect", explain(e, ctx.prefix)))
+            return await ctx.send(embed=make_embed("Couldn't connect", f"{explain(e, ctx.prefix)}{warning}"))
         await self.save(key=connected["key"], deployment=connected["deployment"])
         text = (
             f"Dexbi now answers in your Modmail threads as **{connected['deployment']['name']}**. "
-            f"Change how it answers in the [Dexbi dashboard]({DASHBOARD_URL}) under **Deploy**."
+            f"Change how it answers in the [Dexbi dashboard]({DASHBOARD_URL}) under **Deploy**.{warning}"
         )
         await ctx.send(embed=make_embed("Connected", text))
 
