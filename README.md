@@ -2,7 +2,7 @@
 
 [Dexbi](https://www.dexbi.app) answers your members in Modmail threads. It gives your staff time to reply when they're in a thread, hands threads over to your team when your escalation rules match, and closes threads when the member is done.
 
-Works with self-hosted [Modmail](https://github.com/modmail-dev/modmail) v4.0 and later (tested on 4.0.0 and 4.2.1).
+Works with self-hosted [Modmail](https://github.com/modmail-dev/modmail) v4 (4.0 to 4.2). Modmail v5 is still in development and has no plugin system yet, so plugins can't run on it. Adding one can stop a v5 bot from starting.
 
 ## Install
 
