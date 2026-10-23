@@ -243,12 +243,12 @@ def test_a_members_message_is_sent_as_a_smart_reply_ticket_turn():
         "messageId": "777",
         "member": {"id": "42", "name": "Alex"},
         "message": "I was charged twice",
-        "settings": dexbi.TICKET_SETTINGS,
+        "settings": {**dexbi.TICKET_SETTINGS, "teamWaitMinutes": 5},
     }
     assert dexbi.TICKET_SETTINGS["reply"] == "smart" and dexbi.TICKET_SETTINGS["agent"] == "ticket"
 
 
-def test_a_staff_reply_is_sent_so_dexbi_steps_back():
+def test_a_staff_reply_is_sent_so_dexbi_knows_staff_are_there():
     cog, session, thread = plugin()
     staff_says(cog, thread, "?reply I've refunded it")
     body = session.requests[0]["body"]
@@ -481,6 +481,132 @@ def test_closing_a_thread_forgets_it():
     assert cog.noted_errors == {} and cog.config["paused"] == [901]
 
 
+# waiting for staff
+
+
+class Countdown:
+    """Stands in for the plugin's sleep: the wait ends when the test says so."""
+
+    def __init__(self):
+        self.slept = []
+        self.done = None
+
+    async def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.done = self.done or asyncio.Event()
+        await self.done.wait()
+
+    def end(self):
+        self.done = self.done or asyncio.Event()
+        self.done.set()
+
+
+def waiting(seconds):
+    return {**answer("none"), "teamWaitSeconds": seconds}
+
+
+def said(text, message_id):
+    sent = message(text)
+    sent.id = message_id
+    return sent
+
+
+def test_dexbi_waits_for_staff_then_answers_everything_the_member_said(monkeypatch):
+    cog, session, thread = plugin()
+    countdown = Countdown()
+    monkeypatch.setattr(dexbi.asyncio, "sleep", countdown.sleep)
+    session.answers += [(200, waiting(300)), (200, waiting(240)), (200, answer("reply", "It ships tomorrow."))]
+
+    async def scenario():
+        await cog.on_thread_reply(thread, False, said("it's A-48213", 1), False, False)
+        await cog.on_thread_reply(thread, False, said("hello?", 2), False, False)
+        assert thread.replies == []
+        task = cog.waits[900]["task"]
+        countdown.end()
+        await task
+
+    run(scenario())
+    assert countdown.slept == [300], "one countdown, from the first message"
+    body = session.requests[-1]["body"]
+    assert body["teamWaitOver"] is True and body["message"] == "it's A-48213\nhello?" and body["messageId"] == "2"
+    assert [reply.content for reply in thread.replies] == ["It ships tomorrow."]
+    assert cog.waits == {}
+
+
+def test_a_staff_reply_cancels_the_wait(monkeypatch):
+    cog, session, thread = plugin()
+    countdown = Countdown()
+    monkeypatch.setattr(dexbi.asyncio, "sleep", countdown.sleep)
+    session.answers.append((200, waiting(300)))
+
+    async def scenario():
+        await cog.on_thread_reply(thread, False, said("it's A-48213", 1), False, False)
+        task = cog.waits[900]["task"]
+        await cog.on_thread_reply(thread, True, message("?reply found it, refunding now", 7, "Sam"), False, False)
+        countdown.end()
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    task = run(scenario())
+    assert task.cancelled() and cog.waits == {}
+    assert [request["body"].get("teamWaitOver") for request in session.requests] == [None, None]
+    assert thread.replies == []
+
+
+def test_an_answer_from_dexbi_ends_the_wait(monkeypatch):
+    cog, session, thread = plugin()
+    countdown = Countdown()
+    monkeypatch.setattr(dexbi.asyncio, "sleep", countdown.sleep)
+    session.answers += [(200, waiting(300)), (200, answer("reply", "Refunds take 5 days."))]
+
+    async def scenario():
+        await cog.on_thread_reply(thread, False, said("it's A-48213", 1), False, False)
+        task = cog.waits[900]["task"]
+        await cog.on_thread_reply(thread, False, said("dexbi how long do refunds take?", 2), False, False)
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    assert run(scenario()).cancelled()
+    assert [reply.content for reply in thread.replies] == ["Refunds take 5 days."]
+
+
+def test_closing_or_pausing_a_thread_ends_its_wait(monkeypatch):
+    for end in ("close", "pause"):
+        cog, session, thread = plugin()
+        countdown = Countdown()
+        monkeypatch.setattr(dexbi.asyncio, "sleep", countdown.sleep)
+        session.answers.append((200, waiting(300)))
+
+        async def scenario():
+            await cog.on_thread_reply(thread, False, said("it's A-48213", 1), False, False)
+            task = cog.waits[900]["task"]
+            if end == "close":
+                await cog.on_thread_close(thread, None, False, True, None, False)
+            else:
+                await cog.dexbi_pause.callback(cog, FakeContext(thread.channel))
+            await asyncio.gather(task, return_exceptions=True)
+            return task
+
+        assert run(scenario()).cancelled(), end
+        assert cog.waits == {}
+
+
+def test_wait_sets_the_minutes_dexbi_gives_staff():
+    cog, session, thread = plugin()
+    ctx = FakeContext(FakeChannel(1), command="dexbi wait")
+    run(cog.dexbi_wait.callback(cog, ctx, 10))
+    assert cog.config["wait"] == 10 and "10 min" in ctx.embed.description
+    member_says(cog, thread)
+    assert session.requests[-1]["body"]["settings"]["teamWaitMinutes"] == 10
+    for minutes in (0, 61):
+        try:
+            run(cog.dexbi_wait.callback(cog, ctx, minutes))
+            raise AssertionError("accepted")
+        except commands.BadArgument:
+            pass
+    assert cog.config["wait"] == 10
+
+
 # commands
 
 
@@ -491,7 +617,8 @@ def test_status_shows_settings_and_commands():
     fields = {field.name: field.value for field in ctx.embed.fields}
     assert fields["Status"] == "On" and fields["API key"] == "Working"
     assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "The bot"
-    assert "?dexbi test" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
+    assert fields["Waits for staff"] == "5 min"
+    assert "?dexbi test" in fields["Commands"] and "?dexbi pause" in fields["Commands"] and "?dexbi wait" in fields["Commands"]
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[0]["body"]["author"] == "staff"
 
@@ -603,7 +730,7 @@ def test_a_wrong_argument_shows_the_usage():
 def test_the_cog_and_its_commands_load():
     names = {command.qualified_name for command in dexbi.Dexbi.__cog_commands__}
     assert {"dexbi", "dexbi key", "dexbi on", "dexbi off", "dexbi role", "dexbi style", "dexbi anon",
-            "dexbi test", "dexbi pause", "dexbi resume", "dexbi status", "dexbi setup"} <= names
+            "dexbi test", "dexbi pause", "dexbi resume", "dexbi status", "dexbi setup", "dexbi wait"} <= names
     assert isinstance(dexbi.make_embed("x"), discord.Embed)
 
 

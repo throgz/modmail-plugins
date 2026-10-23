@@ -22,6 +22,7 @@ MAX_IMAGES = 4
 MAX_MESSAGE_CHARS = 4000
 EMBED_LIMIT = 4096
 COLOR = 0x3ECF8E
+DEFAULT_WAIT = 5
 
 TICKET_SETTINGS = {
     "agent": "ticket",
@@ -90,6 +91,26 @@ def to_embed_text(markdown):
 
 def is_image(attachment):
     return urlsplit(attachment.url).path.lower().endswith(IMAGE_TYPES)
+
+
+def readable(message):
+    # a file on its own gives Dexbi nothing to read
+    return bool(message.content.strip()) or any(is_image(a) for a in message.attachments)
+
+
+def member_body(messages):
+    """One request for a member's messages: their words, file names and screenshots."""
+    texts, images = [], []
+    for message in messages:
+        images += [a.url for a in message.attachments if is_image(a)]
+        files = [f"[file: {a.filename}]" for a in message.attachments if not is_image(a)]
+        texts.append("\n".join([message.content.strip(), *files]).strip())
+    last = messages[-1]
+    text = "\n".join(filter(None, texts))
+    body = {"messageId": str(last.id), "member": person_of(last.author), "message": text[:MAX_MESSAGE_CHARS]}
+    if images:
+        body["images"] = images[:MAX_IMAGES]
+    return body
 
 
 def image_name(alt, url, number):
@@ -183,6 +204,8 @@ class Dexbi(commands.Cog):
         self.noted_errors = {}
         self.renamed = set()
         self.locks = {}
+        # thread channel id -> the countdown and the member messages waiting for staff
+        self.waits = {}
 
     async def cog_load(self):
         self.config = await self.db.find_one({"_id": "config"}) or {}
@@ -221,9 +244,12 @@ class Dexbi(commands.Cog):
             return explain(e, self.bot.prefix)
         return None
 
+    def ticket_settings(self):
+        return {**TICKET_SETTINGS, "teamWaitMinutes": self.config.get("wait", DEFAULT_WAIT)}
+
     async def ask(self, thread, body):
         try:
-            return await self.call_api({"conversation": conversation_of(thread), "settings": TICKET_SETTINGS, **body})
+            return await self.call_api({"conversation": conversation_of(thread), "settings": self.ticket_settings(), **body})
         except DexbiError as e:
             await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explain(e, self.bot.prefix))
             return None
@@ -253,6 +279,7 @@ class Dexbi(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_close(self, thread, closer, silent, delete_channel, message, scheduled):
         channel_id = thread.channel.id
+        self.stop_waiting(channel_id)
         self.noted_errors.pop(channel_id, None)
         self.renamed.discard(channel_id)
         self.locks.pop(channel_id, None)
@@ -260,21 +287,44 @@ class Dexbi(commands.Cog):
             await self.save(paused=[c for c in self.config["paused"] if c != channel_id])
 
     async def answer_member(self, thread, message):
-        images = [a.url for a in message.attachments if is_image(a)][:MAX_IMAGES]
-        files = [f"[file: {a.filename}]" for a in message.attachments if not is_image(a)]
-        text = message.content.strip()
-        # a file on its own gives Dexbi nothing to read
-        if not text and not images:
+        if not readable(message):
             return
-        text = "\n".join([text, *files]).strip()
-        body = {"messageId": str(message.id), "member": person_of(message.author), "message": text[:MAX_MESSAGE_CHARS]}
-        if images:
-            body["images"] = images
-        answer = await self.ask(thread, body)
-        if answer:
-            await self.act(thread, message, answer)
+        answer = await self.ask(thread, member_body([message]))
+        if not answer:
+            return
+        if answer.get("teamWaitSeconds"):
+            self.wait_for_staff(thread, message, answer["teamWaitSeconds"])
+        elif answer.get("action") != "none":
+            self.stop_waiting(thread.channel.id)
+        await self.act(thread, message, answer)
+
+    def wait_for_staff(self, thread, message, seconds):
+        # staff replied last: Dexbi answers only if they don't reply within the wait
+        wait = self.waits.get(thread.channel.id)
+        if wait:
+            wait["messages"].append(message)
+            return
+        task = asyncio.ensure_future(self.answer_after_wait(thread, seconds))
+        self.waits[thread.channel.id] = {"task": task, "messages": [message]}
+
+    def stop_waiting(self, channel_id):
+        wait = self.waits.pop(channel_id, None)
+        if wait:
+            wait["task"].cancel()
+
+    async def answer_after_wait(self, thread, seconds):
+        await asyncio.sleep(seconds)
+        channel_id = thread.channel.id
+        async with self.locks.setdefault(channel_id, asyncio.Lock()):
+            wait = self.waits.pop(channel_id, None)
+            if not wait or not self.enabled or self.paused(channel_id):
+                return
+            answer = await self.ask(thread, {**member_body(wait["messages"]), "teamWaitOver": True})
+            if answer:
+                await self.act(thread, wait["messages"][-1], answer)
 
     async def relay_staff_message(self, thread, message):
+        self.stop_waiting(thread.channel.id)
         text = await self.staff_words(message)
         if not text:
             return
@@ -419,6 +469,7 @@ class Dexbi(commands.Cog):
         embed.add_field(name="API key", value=f"Not working: {problem}" if problem else "Working")
         embed.add_field(name="Hand-over ping", value=role.mention if role else "No one")
         embed.add_field(name="Replies as", value="Anonymous staff" if self.config.get("anonymous") else "The bot")
+        embed.add_field(name="Waits for staff", value=f"{self.config.get('wait', DEFAULT_WAIT)} min")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
         embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
         embed.add_field(
@@ -429,6 +480,7 @@ class Dexbi(commands.Cog):
                     f"`{p}dexbi on` / `{p}dexbi off` turn Dexbi on or off",
                     f"`{p}dexbi role @Support` ping a role on hand-over (`none` to stop)",
                     f"`{p}dexbi style bot` / `anonymous` how replies look",
+                    f"`{p}dexbi wait 5` minutes to give staff to reply before Dexbi answers",
                     f"`{p}dexbi test How do refunds work?` try an answer here",
                     f"`{p}dexbi pause` / `{p}dexbi resume` stop or restart Dexbi in one thread",
                     f"`{p}dexbi setup` the setup steps",
@@ -546,6 +598,16 @@ class Dexbi(commands.Cog):
         """Same as style: on is anonymous, off is bot."""
         await self.dexbi_style.callback(self, ctx, "anonymous" if setting == "on" else "bot")
 
+    @dexbi.command(name="wait")
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    async def dexbi_wait(self, ctx, minutes: int):
+        """Minutes to give staff to reply before Dexbi answers (1 to 60)."""
+        if not 1 <= minutes <= 60:
+            raise commands.BadArgument("Pick 1 to 60 minutes.")
+        await self.save(wait=minutes)
+        text = f"When staff replied last in a thread, Dexbi gives them {minutes} min to reply before it answers."
+        await ctx.send(embed=make_embed("Wait saved", text))
+
     @dexbi.command(name="test")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def dexbi_test(self, ctx, *, question: str):
@@ -559,7 +621,7 @@ class Dexbi(commands.Cog):
                         "conversation": f"modmail-test-{uuid.uuid4().hex}",
                         "member": person_of(ctx.author),
                         "message": question[:MAX_MESSAGE_CHARS],
-                        "settings": TICKET_SETTINGS,
+                        "settings": self.ticket_settings(),
                     }
                 )
             except DexbiError as e:
@@ -584,6 +646,7 @@ class Dexbi(commands.Cog):
         thread = await self.thread_here(ctx)
         if thread is None:
             return
+        self.stop_waiting(thread.channel.id)
         if not self.paused(thread.channel.id):
             await self.save(paused=self.config.get("paused", []) + [thread.channel.id])
         await ctx.send(embed=make_embed("Dexbi paused here", f"Dexbi won't answer in this thread. `{ctx.prefix}dexbi resume` to undo."))
