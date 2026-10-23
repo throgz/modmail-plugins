@@ -482,7 +482,7 @@ def test_a_bot_that_was_disconnected_says_how_to_connect_again():
     session.answers.append((401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}}))
     member_says(cog, thread)
     note = thread.channel.sent[0].embed.description
-    assert "isn't connected to Dexbi anymore" in note and "**Deploy**" in note
+    assert "disconnected from Dexbi" in note and "**Reconnect**" in note and "`?dexbi connect`" in note
 
 
 def test_dexbi_being_down_says_it_will_answer_again():
@@ -716,7 +716,7 @@ def test_checking_in_quietly_skips_an_older_dexbi_and_notes_a_dead_key():
     run(cog.check_in())
     assert cog.last_error is None and cog.config["deployment"] == deployment()
     run(cog.check_in())
-    assert "isn't connected to Dexbi anymore" in cog.last_error
+    assert "disconnected from Dexbi" in cog.last_error
     assert thread.channel.sent == []
 
 
@@ -750,6 +750,17 @@ def test_status_with_a_manual_key():
     run(cog.dexbi.callback(cog, ctx))
     fields = {field.name: field.value for field in ctx.embed.fields}
     assert fields["Connection"] == "Manual API key" and fields["Hand-over ping"] == ROLE.mention
+
+
+def test_status_says_when_the_bot_was_disconnected():
+    cog, session, thread = plugin({"deployment": deployment()})
+    bad_key = (401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}})
+    session.answers += [bad_key, bad_key]
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi.callback(cog, ctx))
+    fields = {field.name: field.value for field in ctx.embed.fields}
+    assert fields["Connection"] == "Disconnected"
+    assert "**Reconnect**" in fields["Check"] and "`?dexbi connect`" in fields["Check"]
 
 
 def test_status_says_when_the_key_does_not_work():

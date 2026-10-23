@@ -153,8 +153,8 @@ def person_of(user):
 def explain(error, prefix, connected=False):
     if error.kind == "invalid_key" and connected:
         return (
-            "This bot isn't connected to Dexbi anymore. In the Dexbi dashboard open **Deploy**, open your "
-            "Modmail deployment (or **New** > **Modmail**) and run the connect command it shows."
+            f"This bot is disconnected from Dexbi. To reconnect, open **Deploy** in the [Dexbi dashboard]({DASHBOARD_URL}), "
+            f"open your Modmail deployment and click **Reconnect**, then run the `{prefix}dexbi connect` command it shows."
         )
     if error.kind == "invalid_key":
         return (
@@ -286,7 +286,7 @@ class Dexbi(commands.Cog):
                 {"conversation": "modmail-key-check", "member": person_of(user), "message": "Key check", "author": "staff"}
             )
         except DexbiError as e:
-            return explain(e, self.bot.prefix, bool(self.deployment))
+            return e
         return None
 
     # A connected bot gets these from the dashboard. The stored values are for servers set up with `?dexbi key`.
@@ -520,12 +520,18 @@ class Dexbi(commands.Cog):
         if not self.config.get("key"):
             return self.setup_embed(ctx)
         await self.check_in()
-        problem = await self.check_key(ctx.author)
+        error = await self.check_key(ctx.author)
         roles = self.handover_roles(ctx.guild) if ctx.guild else []
-        connection = f"Connected to **{self.deployment.get('name')}**" if self.deployment else "Manual API key"
+        if self.deployment and error and error.kind == "invalid_key":
+            connection = "Disconnected"
+        elif self.deployment:
+            connection = f"Connected to **{self.deployment.get('name')}**"
+        else:
+            connection = "Manual API key"
         embed = make_embed("Dexbi", "Dexbi answers your members in Modmail threads.")
         embed.add_field(name="Connection", value=connection)
-        embed.add_field(name="Check", value=f"Not working: {problem}" if problem else "Working")
+        check = f"Not working: {explain(error, p, bool(self.deployment))}" if error else "Working"
+        embed.add_field(name="Check", value=check[:1024])
         embed.add_field(name="Replies as", value="Anonymous staff" if self.replies_anonymously() else "The bot")
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
@@ -610,9 +616,9 @@ class Dexbi(commands.Cog):
         """Set your Dexbi API key."""
         warning = await self.delete_command(ctx, "key")
         await self.save(key=key.strip(), deployment=None)
-        problem = await self.check_key(ctx.author)
-        if problem:
-            embed = make_embed("Key saved, but it doesn't work", f"{problem}{warning}")
+        error = await self.check_key(ctx.author)
+        if error:
+            embed = make_embed("Key saved, but it doesn't work", f"{explain(error, ctx.prefix)}{warning}")
         else:
             embed = make_embed("You're all set", f"Dexbi now answers in your Modmail threads.{warning}")
         await ctx.send(embed=embed)

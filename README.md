@@ -37,6 +37,7 @@ Rather use an API key? Create one under **Settings > API keys** and run `?dexbi 
 - Screenshots from your Dexbi documents show up as images in the reply.
 - Dexbi reads screenshots members send (up to 4 per message). Other files are passed on by name only.
 - If something goes wrong (bot disconnected, plan limit), the member sees nothing and staff get one note in the thread.
+- If the bot gets disconnected (Disconnect in the dashboard, or the deployment was deleted), `?dexbi` shows **Disconnected**. To reconnect, open your Modmail deployment under **Deploy**, click **Reconnect** and run the `?dexbi connect` command it shows.
 - Docs: https://docs.dexbi.app/tutorials/modmail
 
 ## License
