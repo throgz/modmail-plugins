@@ -2,7 +2,7 @@
 
 [Dexbi](https://www.dexbi.app) answers your members in Modmail threads. It stays out of the way while your staff are talking, hands threads over to your team when your escalation rules match, and closes threads when the member is done.
 
-Needs a self-hosted [Modmail](https://github.com/modmail-dev/modmail) bot, v4 or later.
+Works with self-hosted [Modmail](https://github.com/modmail-dev/modmail) v4.0 and later (tested on 4.0.0 and 4.2.1).
 
 ## Install
 
