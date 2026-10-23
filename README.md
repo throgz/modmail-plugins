@@ -14,13 +14,16 @@ Needs a self-hosted [Modmail](https://github.com/modmail-dev/modmail) bot, v4 or
 
 | Command | Description |
 | --- | --- |
+| `?dexbi` | Status and all commands (setup steps if there's no key yet) |
 | `?dexbi key <key>` | Set your Dexbi API key |
 | `?dexbi on` / `?dexbi off` | Turn Dexbi on or off |
-| `?dexbi role [@role]` | Role to ping on a hand-over (leave empty for none) |
-| `?dexbi anon on/off` | Reply as anonymous staff or as the bot (default) |
-| `?dexbi status` | Show settings and the last error |
+| `?dexbi role @role` / `?dexbi role none` | Role to ping when Dexbi hands a thread over |
+| `?dexbi style bot` / `?dexbi style anonymous` | Reply as the bot (default) or as anonymous staff |
+| `?dexbi test <question>` | See Dexbi's answer in the channel, without messaging anyone |
+| `?dexbi pause` / `?dexbi resume` | Stop or restart Dexbi in the current thread |
+| `?dexbi status` / `?dexbi setup` | Status, or the setup steps |
 
-All commands need the Administrator permission level.
+`key`, `on`, `off`, `role`, `style` and `test` need the Administrator permission level. The rest work for Supporters.
 
 ## Notes
 
