@@ -77,7 +77,7 @@ class FakeChannel:
 
     async def send(self, content=None, embed=None, allowed_mentions=None, files=None):
         sent = SimpleNamespace(content=content, embed=embed, mentions=allowed_mentions, files=files,
-                               attachments=[SimpleNamespace(filename=f.filename) for f in files or []])
+                               attachments=[SimpleNamespace(filename=f.filename, url=f"https://cdn.discordapp.com/{f.filename}") for f in files or []])
         self.sent.append(sent)
         return sent
 
@@ -85,15 +85,27 @@ class FakeChannel:
         self.name = name
 
 
+class SentCard:
+    def __init__(self):
+        self.embeds = [dexbi.discord.Embed(description="answer")]
+
+    async def edit(self, *, embeds):
+        self.embeds = embeds
+
+
 class FakeThread:
     def __init__(self):
         self.channel = FakeChannel()
         self.recipient = FakeChannel(901)
         self.replies = []
+        self.cards = []
         self.closed_by = None
 
     async def reply(self, message, content=None, anonymous=False, plain=False):
         self.replies.append(SimpleNamespace(message=message, content=content, anonymous=anonymous))
+        dm, copy = SentCard(), SentCard()
+        self.cards += [dm, copy]
+        return [dm], copy
 
     async def close(self, *, closer):
         self.closed_by = closer
@@ -289,9 +301,12 @@ def test_images_ride_on_the_reply_like_staff_attachments_with_no_gap():
     member_says(cog, thread)
     [sent] = thread.replies
     assert sent.content == "**Steps**\n\n1. Open Deploy."
-    assert [a.filename for a in sent.message.attachments] == ["deploy.webp", "menu.png"]
+    assert [a.filename for a in sent.message.attachments] == ["deploy.webp"]
     [upload] = cog.bot.log_channel.sent
     assert [f.filename for f in upload.files] == ["deploy.webp", "menu.png"]
+    # the second screenshot joins the same card in the DM and the thread
+    for card in thread.cards:
+        assert len(card.embeds) == 2 and card.embeds[0].url == card.embeds[1].url
 
 
 def test_without_a_log_channel_images_are_sent_after_the_reply():

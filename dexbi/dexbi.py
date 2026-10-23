@@ -279,6 +279,7 @@ class Dexbi(commands.Cog):
         attachments = await self.host_images(files)
         text = to_embed_text(markdown)
         parts = split_text(text) if text else [""] if attachments else []
+        sent = None
         for i, part in enumerate(parts):
             # thread.reply needs a message: reply with a copy authored by the bot user, which has no
             # roles, so Modmail's footer shows the bot's name
@@ -286,13 +287,33 @@ class Dexbi(commands.Cog):
             msg.author = self.bot.user
             msg.channel = thread.channel
             msg.content = part
-            msg.attachments = attachments if i == len(parts) - 1 else []
+            msg.attachments = attachments[:1] if i == len(parts) - 1 else []
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
+            sent = await thread.reply(msg, part, anonymous=self.config.get("anonymous", False))
         if files and not attachments:
             await self.send_files(thread, files)
+        elif len(attachments) > 1 and not await self.add_to_gallery(sent, attachments):
+            await self.send_files(thread, files[1:])
+
+    async def add_to_gallery(self, sent, attachments):
+        # Discord shows embeds that share a url as one card with an image grid
+        if not isinstance(sent, tuple):
+            return False
+        user_messages, thread_message = sent
+        messages = [m for m in [*(user_messages or []), thread_message] if m and m.embeds]
+        if not messages:
+            return False
+        for message in messages:
+            main = message.embeds[0]
+            main.url = attachments[0].url
+            extra = [discord.Embed(url=main.url).set_image(url=a.url) for a in attachments[1:]]
+            try:
+                await message.edit(embeds=[main, *extra])
+            except discord.HTTPException:
+                return False
+        return True
 
     async def download_images(self, images):
         files = []
