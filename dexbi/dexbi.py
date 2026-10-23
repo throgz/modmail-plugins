@@ -144,6 +144,31 @@ def explain(error, prefix):
     return error.detail
 
 
+class NameTag:
+    def __init__(self, name):
+        self.name = name
+        self.position = 0
+        self.hoist = True
+
+    def __str__(self):
+        return self.name
+
+
+class ReplyAuthor:
+    """The bot, as the author of Dexbi's replies.
+
+    Modmail puts the author's top role in a reply's footer. The bot has no roles there:
+    Modmail 4.2 falls back to its name and 4.0-4.1 fail, so give it its own name as the role.
+    """
+
+    def __init__(self, user):
+        self._user = user
+        self.roles = [NameTag(user.display_name)]
+
+    def __getattr__(self, name):
+        return getattr(self._user, name)
+
+
 def make_embed(title, description=None):
     return discord.Embed(title=title, description=description, color=COLOR)
 
@@ -293,10 +318,9 @@ class Dexbi(commands.Cog):
         parts = split_text(text) if text else [""] if attachments else []
         sent = None
         for i, part in enumerate(parts):
-            # thread.reply needs a message: reply with a copy authored by the bot user, which has no
-            # roles, so Modmail's footer shows the bot's name
+            # thread.reply needs a message: reply with a copy authored by the bot
             msg = DummyMessage(copy.copy(member_message))
-            msg.author = self.bot.user
+            msg.author = ReplyAuthor(self.bot.user)
             msg.channel = thread.channel
             msg.content = part
             msg.attachments = attachments[:1] if i == len(parts) - 1 else []

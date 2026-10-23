@@ -312,8 +312,10 @@ def test_reply_goes_to_the_member_as_the_bot_user():
     member_says(cog, thread)
     [sent] = thread.replies
     assert sent.content == "**Refunds**\nThey take 5 days." and sent.anonymous is False
-    # no roles on the author, so Modmail's footer falls back to the bot's name
-    assert sent.message.author is cog.bot.user and not hasattr(sent.message.author, "roles")
+    # Modmail's footer shows the author's top hoisted role: here, the bot's name
+    author = sent.message.author
+    top = sorted(author.roles, key=lambda r: r.position, reverse=True)[0]
+    assert author.id == cog.bot.user.id and top.hoist and str(top) == cog.bot.user.display_name
     assert sent.message.channel is thread.channel
     assert sent.message.stickers == [] and sent.message.attachments == []
 
@@ -623,3 +625,4 @@ def test_a_link_to_a_screenshot_is_attached_not_shown_as_an_address():
     reply = f"Here's the New button: [{url}]({url})\nThen click it."
     assert dexbi.to_embed_text(reply) == "Here's the New button:\nThen click it."
     assert dexbi.named_images(reply) == [("screenshot-1.webp", url)]
+
