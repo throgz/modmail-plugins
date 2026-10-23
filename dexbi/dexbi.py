@@ -530,12 +530,15 @@ class Dexbi(commands.Cog):
             connection = "Manual API key"
         embed = make_embed("Dexbi", "Dexbi answers your members in Modmail threads.")
         embed.add_field(name="Connection", value=connection)
-        check = f"Not working: {explain(error, p, bool(self.deployment))}" if error else "Working"
-        embed.add_field(name="Check", value=check[:1024])
+        embed.add_field(name="Check", value="Not working" if error else "Working")
         embed.add_field(name="Replies as", value="Anonymous staff" if self.replies_anonymously() else "The bot")
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
-        embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
+        # what's wrong now says how to fix it; otherwise show the last thing that went wrong
+        if error:
+            embed.add_field(name="What to do", value=explain(error, p, bool(self.deployment))[:1024], inline=False)
+        else:
+            embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
         embed.add_field(
             name="Commands",
             value="\n".join(

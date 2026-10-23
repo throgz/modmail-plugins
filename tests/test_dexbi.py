@@ -760,7 +760,8 @@ def test_status_says_when_the_bot_was_disconnected():
     run(cog.dexbi.callback(cog, ctx))
     fields = {field.name: field.value for field in ctx.embed.fields}
     assert fields["Connection"] == "Disconnected"
-    assert "**Reconnect**" in fields["Check"] and "`?dexbi connect`" in fields["Check"]
+    assert fields["Check"] == "Not working" and "Last error" not in fields
+    assert "**Reconnect**" in fields["What to do"] and "`?dexbi connect`" in fields["What to do"]
 
 
 def test_status_says_when_the_key_does_not_work():
@@ -769,7 +770,8 @@ def test_status_says_when_the_key_does_not_work():
     session.answers += [bad_key, bad_key]
     ctx = FakeContext(FakeChannel(1))
     run(cog.dexbi_status.callback(cog, ctx))
-    assert {f.name: f.value for f in ctx.embed.fields}["Check"].startswith("Not working: The API key is wrong")
+    fields = {f.name: f.value for f in ctx.embed.fields}
+    assert fields["Check"] == "Not working" and fields["What to do"].startswith("The API key is wrong")
 
 
 def test_without_a_key_status_shows_the_setup_steps():
