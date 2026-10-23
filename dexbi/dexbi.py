@@ -92,10 +92,6 @@ def is_image(attachment):
     return urlsplit(attachment.url).path.lower().endswith(IMAGE_TYPES)
 
 
-def image_urls(markdown):
-    return [m.group(2) for m in IMAGE.finditer(markdown) if shows_inline(m.group(2))]
-
-
 def image_name(alt, url, number):
     ext = urlsplit(url).path.rsplit(".", 1)[-1].lower()
     words = [] if alt.startswith("http") else re.findall(r"[a-z0-9]+", alt.lower())[:6]
@@ -575,9 +571,9 @@ class Dexbi(commands.Cog):
             embed.add_field(name="Staff note", value=answer["staffNote"][:1024], inline=False)
         if answer.get("title"):
             embed.add_field(name="Suggested title", value=answer["title"][:1024])
-        images = image_urls(answer.get("message") or "")
+        images = named_images(answer.get("message") or "")
         if images:
-            embed.set_image(url=images[0])
+            embed.set_image(url=images[0][1])
         embed.set_footer(text="Only shown here. This counts as one AI reply.")
         await ctx.send(embed=embed)
 

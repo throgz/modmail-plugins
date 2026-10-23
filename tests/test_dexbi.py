@@ -199,13 +199,13 @@ def test_headings_become_bold_lines():
 def test_images_are_taken_out_of_the_text_to_be_shown_as_images():
     text = 'See this:\n![The settings page](https://cdn.example.com/a.webp)\n\n*The page.*\n![](https://cdn.example.com/b.PNG "B")'
     assert dexbi.to_embed_text(text) == "See this:\n\n*The page.*"
-    assert dexbi.image_urls(text) == ["https://cdn.example.com/a.webp", "https://cdn.example.com/b.PNG"]
+    assert [url for _, url in dexbi.named_images(text)] == ["https://cdn.example.com/a.webp", "https://cdn.example.com/b.PNG"]
 
 
 def test_an_image_modmail_cannot_show_stays_a_link():
     text = "![Diagram](https://example.com/render?id=4)"
     assert dexbi.to_embed_text(text) == "[Diagram](https://example.com/render?id=4)"
-    assert dexbi.image_urls(text) == []
+    assert dexbi.named_images(text) == []
 
 
 def test_tables_become_lines():
