@@ -419,6 +419,65 @@ def test_an_answer_brings_the_latest_dashboard_settings():
     assert thread.replies[0].anonymous is True
 
 
+DEXBI_ICON = "https://www.dexbi.app/dexbi-icon.png"
+FREE = {"name": "Dexbi", "iconUrl": DEXBI_ICON, "required": True}
+POWERED_BY = "Powered by [dexbi.app](https://dexbi.app)"
+
+
+def branded(text, branding):
+    return {**answer("reply", text), "branding": branding}
+
+
+def test_on_the_free_plan_replies_come_from_dexbi_even_when_anonymous():
+    cog, session, thread = plugin({"deployment": deployment("anonymous")})
+    session.answers.append((200, branded(f"Refunds take 5 days.\n\n{POWERED_BY}", FREE)))
+    member_says(cog, thread)
+    [sent] = thread.replies
+    assert sent.anonymous is False
+    assert sent.content == f"Refunds take 5 days.\n\n{POWERED_BY}"
+    author = sent.message.author
+    assert str(author) == "Dexbi" and author.display_avatar.url == DEXBI_ICON
+    # not the bot, or Modmail would show the bot's own avatar
+    assert author.id != cog.bot.user.id
+    assert str(author.roles[0]) == "Dexbi"
+
+
+def test_a_paid_profile_is_the_sender_unless_replies_are_anonymous():
+    profile = {"name": "Acme Help", "iconUrl": "https://cdn.example.com/avatar.png", "required": False}
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((200, branded("Refunds take 5 days.", profile)))
+    member_says(cog, thread)
+    author = thread.replies[0].message.author
+    assert str(author) == "Acme Help" and author.display_avatar.url == profile["iconUrl"]
+
+    cog, session, thread = plugin({"deployment": deployment("anonymous")})
+    session.answers.append((200, branded("Refunds take 5 days.", profile)))
+    member_says(cog, thread)
+    assert thread.replies[0].anonymous is True
+    assert thread.replies[0].message.author.id == cog.bot.user.id
+
+
+def test_a_name_without_a_picture_keeps_the_bots_avatar():
+    cog, session, thread = plugin()
+    session.answers.append((200, branded("Hi!", {"name": "Acme Help", "iconUrl": None, "required": False})))
+    member_says(cog, thread)
+    author = thread.replies[0].message.author
+    assert str(author) == "Acme Help" and author.id == cog.bot.user.id
+
+
+def test_a_branded_reply_is_never_sent_back():
+    cog, session, thread = plugin()
+    sent = message("Refunds take 5 days.")
+    sent.author = dexbi.ReplyAuthor(cog.bot.user, FREE)
+    run(cog.on_thread_reply(thread, True, sent, False, False))
+    assert session.requests == []
+
+
+def test_the_powered_by_line_stays_in_the_text():
+    assert dexbi.to_embed_text(f"## Refunds\nThey take 5 days.\n\n{POWERED_BY}").endswith(f"\n\n{POWERED_BY}")
+    assert dexbi.named_images(POWERED_BY) == []
+
+
 def test_handover_tells_the_member_briefs_staff_and_pings_the_role():
     cog, session, thread = plugin({"role_id": ROLE_ID})
     session.answers.append((200, answer("handover", "A teammate will help.", staff_note="Charged twice.")))
@@ -642,7 +701,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.1.0"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.2.0"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -725,7 +784,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.1.0"
+    assert dexbi.__version__ == "1.2.0"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -747,9 +806,19 @@ def test_status_shows_the_connection_settings_and_commands():
     assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "Anonymous staff"
     assert "?dexbi connect" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
     assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
-    assert fields["Plugin"] == "v1.1.0"
+    assert fields["Plugin"] == "v1.2.0"
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[1]["body"]["author"] == "staff"
+
+
+def test_status_says_free_plan_replies_come_from_dexbi():
+    cog, session, thread = plugin({"deployment": deployment("anonymous")})
+    session.answers.append((200, {"deployment": deployment("anonymous")}))
+    session.answers.append((200, {**answer("none"), "branding": FREE}))
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi.callback(cog, ctx))
+    fields = {field.name: field.value for field in ctx.embed.fields}
+    assert fields["Replies as"] == "Dexbi (free plan)"
 
 
 def test_status_with_a_manual_key():

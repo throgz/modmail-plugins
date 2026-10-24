@@ -3,6 +3,7 @@ import copy
 import io
 import re
 import uuid
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -12,7 +13,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logger = getLogger(__name__)
 
@@ -180,21 +181,29 @@ class NameTag:
 
 
 class ReplyAuthor:
-    """The bot, as the author of Dexbi's replies.
+    """The author of Dexbi's replies: the bot, or the sender Dexbi names (the plan's branding).
 
     Modmail puts the author's top role in a reply's footer. The bot has no roles there:
     Modmail 4.2 falls back to its name and 4.0-4.1 fail, so give it its own name as the role.
     """
 
-    def __init__(self, user):
+    def __init__(self, user, sender=None):
         self._user = user
-        self.roles = [NameTag(user.display_name)]
+        self._name = (sender or {}).get("name")
+        icon = (sender or {}).get("iconUrl")
+        if self._name:
+            self.name = self.display_name = self._name
+        if icon:
+            # Modmail shows a server member's own avatar, so this author can't be one
+            self.id = 0
+            self.display_avatar = SimpleNamespace(url=icon)
+        self.roles = [NameTag(self._name or user.display_name)]
 
     def __getattr__(self, name):
         return getattr(self._user, name)
 
     def __str__(self):
-        return str(self._user)
+        return self._name or str(self._user)
 
 
 def make_embed(title, description=None):
@@ -235,6 +244,8 @@ class Dexbi(commands.Cog):
         # thread channel id -> the countdown and the member messages waiting for staff
         self.waits = {}
         self.checking_in = None
+        # who replies are sent as, from the last answer
+        self.branding = None
 
     async def cog_load(self):
         self.config = await self.db.find_one({"_id": "config"}) or {}
@@ -282,6 +293,8 @@ class Dexbi(commands.Cog):
         answer = await self.call("POST", "messages", body)
         if "deployment" in answer:
             await self.remember(answer["deployment"])
+        if "branding" in answer:
+            self.branding = answer["branding"]
         return answer
 
     async def remember(self, deployment):
@@ -322,6 +335,14 @@ class Dexbi(commands.Cog):
         if self.deployment:
             return self.deployment.get("replyAs") == "anonymous"
         return self.config.get("anonymous", False)
+
+    def replies_as(self):
+        branding = self.branding or {}
+        if branding.get("required"):
+            return f"{branding.get('name')} (free plan)"
+        if self.replies_anonymously():
+            return "Anonymous staff"
+        return branding.get("name") or "The bot"
 
     def handover_roles(self, guild):
         ids = self.deployment.get("handoverRoleIds", []) if self.deployment else [self.config.get("role_id")]
@@ -374,7 +395,7 @@ class Dexbi(commands.Cog):
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
-        if not self.enabled or self.paused(thread.channel.id) or message.author.id == self.bot.user.id:
+        if not self.enabled or self.paused(thread.channel.id) or self.sent_by_dexbi(message):
             return
         lock = self.locks.setdefault(thread.channel.id, asyncio.Lock())
         async with lock:
@@ -382,6 +403,9 @@ class Dexbi(commands.Cog):
                 await self.relay_staff_message(thread, message)
             else:
                 await self.answer_member(thread, message)
+
+    def sent_by_dexbi(self, message):
+        return isinstance(message.author, ReplyAuthor) or message.author.id == self.bot.user.id
 
     @commands.Cog.listener()
     async def on_thread_close(self, thread, closer, silent, delete_channel, message, scheduled):
@@ -459,7 +483,7 @@ class Dexbi(commands.Cog):
     async def act(self, thread, member_message, answer):
         action, text = answer.get("action"), answer.get("message")
         if action in ("reply", "handover", "close") and text:
-            await self.reply(thread, member_message, text)
+            await self.reply(thread, member_message, text, answer.get("branding"))
         if action == "handover":
             await self.alert_staff(thread, answer.get("staffNote"))
         if answer.get("title"):
@@ -467,23 +491,26 @@ class Dexbi(commands.Cog):
         if action == "close":
             await thread.close(closer=thread.channel.guild.me)
 
-    async def reply(self, thread, member_message, markdown):
+    async def reply(self, thread, member_message, markdown, branding=None):
         files = await self.download_images(named_images(markdown))
         attachments = await self.host_images(files)
         text = to_embed_text(markdown)
         parts = split_text(text) if text else [""] if attachments else []
+        # on the free plan replies are always sent as Dexbi, never anonymously
+        anonymous = self.replies_anonymously() and not (branding or {}).get("required")
+        sender = None if anonymous else branding
         sent = None
         for i, part in enumerate(parts):
             # thread.reply needs a message: reply with a copy authored by the bot
             msg = DummyMessage(copy.copy(member_message))
-            msg.author = ReplyAuthor(self.bot.user)
+            msg.author = ReplyAuthor(self.bot.user, sender)
             msg.channel = thread.channel
             msg.content = part
             msg.attachments = attachments[:1] if i == len(parts) - 1 else []
             msg.stickers = []
             msg.embeds = []
             msg.message_snapshots = []
-            sent = await thread.reply(msg, anonymous=self.replies_anonymously())
+            sent = await thread.reply(msg, anonymous=anonymous)
         if files and not attachments:
             await self.send_files(thread, files)
         elif len(attachments) > 1 and not await self.add_to_gallery(sent, attachments):
@@ -582,7 +609,7 @@ class Dexbi(commands.Cog):
         embed = make_embed("Dexbi", "Dexbi answers your members in Modmail threads.")
         embed.add_field(name="Connection", value=connection)
         embed.add_field(name="Check", value="Not working" if error else "Working")
-        embed.add_field(name="Replies as", value="Anonymous staff" if self.replies_anonymously() else "The bot")
+        embed.add_field(name="Replies as", value=self.replies_as())
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
         embed.add_field(name="Plugin", value=f"v{__version__}")
