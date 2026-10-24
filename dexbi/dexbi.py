@@ -13,7 +13,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 logger = getLogger(__name__)
 
@@ -573,7 +573,7 @@ class Dexbi(commands.Cog):
 
     async def alert_staff(self, thread, staff_note):
         roles = self.handover_roles(thread.channel.guild)
-        embed = make_embed("Dexbi handed this thread to your team", staff_note or None)
+        embed = make_embed("Dexbi escalated this thread to your team", staff_note or None)
         embed.set_footer(text="Dexbi stays quiet in this thread now.")
         mentions = discord.AllowedMentions(everyone=False, users=False, roles=roles or False)
         content = " ".join(role.mention for role in roles) or None

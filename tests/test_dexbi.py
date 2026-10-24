@@ -701,7 +701,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.2.0"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.2.1"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -784,7 +784,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.2.0"
+    assert dexbi.__version__ == "1.2.1"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -806,7 +806,7 @@ def test_status_shows_the_connection_settings_and_commands():
     assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "Anonymous staff"
     assert "?dexbi connect" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
     assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
-    assert fields["Plugin"] == "v1.2.0"
+    assert fields["Plugin"] == "v1.2.1"
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[1]["body"]["author"] == "staff"
 
