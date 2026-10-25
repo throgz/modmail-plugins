@@ -8,7 +8,7 @@ Works with self-hosted [Modmail](https://github.com/modmail-dev/modmail) v4 (4.0
 
 1. In the [Dexbi dashboard](https://dash.dexbi.app), open **Deploy** and click **New** under Ticket agent. Pick **Modmail**.
 2. Run the two commands the dashboard shows in your Modmail server:
-   - `?plugins add throgz/modmail-plugins/dexbi`
+   - `?plugins add throgz/modmail-plugins/dexbi@master`
    - `?dexbi connect <code>` (the code works once and runs out after 15 minutes; the dashboard always shows a fresh one, and the plugin deletes your message)
 3. The dashboard shows **Connected**. Dexbi now answers new messages in your Modmail threads.
 
@@ -19,10 +19,10 @@ Rather use an API key? Create one under **Settings > API keys** and run `?dexbi 
 ## Updating
 
 ```
-?plugins update throgz/modmail-plugins/dexbi
+?plugins update throgz/modmail-plugins/dexbi@master
 ```
 
-`?dexbi` shows which version you have, and your Modmail deployment in the dashboard says when a newer one is out. Running `?plugins add throgz/modmail-plugins/dexbi` again also updates it (from 1.1.0 on).
+`?dexbi` shows which version you have, and your Modmail deployment in the dashboard says when a newer one is out. Running `?plugins add throgz/modmail-plugins/dexbi@master` again also updates it (from 1.1.0 on).
 
 ## Commands
 

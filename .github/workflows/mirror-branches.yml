@@ -1,0 +1,17 @@
+name: Mirror branches
+
+# Modmail forks download different default branches (master, stable, main),
+# so keep all three on the same commit.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git push --force origin HEAD:stable HEAD:main
