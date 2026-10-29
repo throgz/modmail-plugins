@@ -276,15 +276,23 @@ def test_dexbis_own_replies_are_never_sent_back():
     assert session.requests == []
 
 
-def test_nothing_is_sent_while_off_paused_without_a_key_or_without_words():
-    for config in ({"key": None}, {"paused": [900]}):
-        cog, session, thread = plugin(config)
-        member_says(cog, thread)
-        staff_says(cog, thread, "?reply hi")
-        assert session.requests == []
+def test_nothing_is_sent_without_a_key_or_without_words():
+    cog, session, thread = plugin({"key": None})
+    member_says(cog, thread)
+    staff_says(cog, thread, "?reply hi")
+    assert session.requests == []
     cog, session, thread = plugin()
     member_says(cog, thread, "   ")
     assert session.requests == []
+
+
+def test_while_paused_staff_replies_are_still_sent_but_the_member_is_not_answered():
+    cog, session, thread = plugin({"paused": [900]})
+    member_says(cog, thread)
+    staff_says(cog, thread, "?reply I've refunded the second charge")
+    [request] = session.requests
+    assert request["body"]["author"] == "staff" and request["body"]["message"] == "I've refunded the second charge"
+    assert thread.replies == []
 
 
 def attached(content, *names):
@@ -525,14 +533,14 @@ def test_a_title_renames_the_thread_once_keeping_its_name():
 def test_a_failure_is_told_to_staff_once_per_kind_and_never_to_the_member():
     cog, session, thread = plugin()
     bad_key = (401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}})
-    limit = (429, {"error": {"code": "daily_limit_reached", "message": "Your plan's API calls for today are used up."}})
+    limit = (429, {"error": {"code": "rate_limited", "message": "Over 10 calls a minute for this workspace. Retry after the reset."}})
     session.answers += [bad_key, bad_key, limit]
     for _ in range(3):
         member_says(cog, thread)
     notes = [sent.embed for sent in thread.channel.sent]
     assert [note.title for note in notes] == ["Dexbi couldn't answer", "Dexbi couldn't answer"]
     assert "Settings > API keys" in notes[0].description and "`?dexbi key <key>`" in notes[0].description
-    assert "used up" in notes[1].description
+    assert "calls a minute" in notes[1].description
     assert thread.replies == [] and cog.last_error.endswith(notes[1].description)
 
 
@@ -701,7 +709,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.2.1"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.0"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -784,7 +792,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.2.1"
+    assert dexbi.__version__ == "1.3.0"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -804,9 +812,10 @@ def test_status_shows_the_connection_settings_and_commands():
     fields = {field.name: field.value for field in ctx.embed.fields}
     assert fields["Connection"] == "Connected to **Modmail**" and fields["Check"] == "Working"
     assert fields["Hand-over ping"] == ROLE.mention and fields["Replies as"] == "Anonymous staff"
-    assert "?dexbi connect" in fields["Commands"] and "?dexbi pause" in fields["Commands"]
+    assert "?dexbi connect" in fields["Commands"] and "?dexbi pause [30m|1h|24h]" in fields["Commands"]
+    assert "?dexbi resume" in fields["Commands"] and "?dexbi forget" in fields["Commands"]
     assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
-    assert fields["Plugin"] == "v1.2.1"
+    assert fields["Plugin"] == "v1.3.0"
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[1]["body"]["author"] == "staff"
 
@@ -894,11 +903,103 @@ def test_pause_and_resume_in_a_thread():
     ctx = FakeContext(thread.channel)
     run(cog.dexbi_pause.callback(cog, ctx))
     assert cog.config["paused"] == [900] and ctx.embed.title == "Dexbi paused here"
+    assert "until you resume it" in ctx.embed.description
     member_says(cog, thread)
     assert session.requests == []
+    session.answers.append((200, {"action": "resume", "conversation": "modmail-900"}))
     run(cog.dexbi_resume.callback(cog, ctx))
     member_says(cog, thread)
-    assert cog.config["paused"] == [] and len(session.requests) == 1
+    assert cog.config["paused"] == [] and ctx.embed.title == "Dexbi resumed here"
+    assert [request["url"] for request in session.requests] == [
+        "https://api.dexbi.app/v1/conversations/resume",
+        "https://api.dexbi.app/v1/messages",
+    ]
+
+
+def test_resume_gives_an_escalated_thread_back_to_dexbi():
+    cog, session, thread = plugin({"deployment": deployment(roles=[ROLE_ID])})
+    session.answers += [
+        (200, answer("handover", "A teammate will help.", staff_note="Wants a refund.")),
+        (200, answer("none")),
+        (200, answer("none")),
+        (200, {"action": "resume", "conversation": "modmail-900"}),
+        (200, answer("reply", "Refunds take 5 days.")),
+    ]
+    member_says(cog, thread, "I want a refund")
+    assert "?dexbi resume" in thread.channel.sent[0].embed.footer.text
+    member_says(cog, thread, "any update?")
+    assert [reply.content for reply in thread.replies] == ["A teammate will help."]
+
+    staff_says(cog, thread, "?reply refunded, Dexbi can take it from here")
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_resume.callback(cog, ctx))
+    control = session.requests[-1]
+    assert control["url"] == "https://api.dexbi.app/v1/conversations/resume"
+    assert control["body"] == {"conversation": "modmail-900"} and control["headers"]["Authorization"] == "Bearer dexbi_test"
+    assert ctx.embed.title == "Dexbi resumed here"
+
+    member_says(cog, thread, "how long will it take?")
+    assert [reply.content for reply in thread.replies] == ["A teammate will help.", "Refunds take 5 days."]
+
+
+def test_a_resume_that_fails_says_so_and_still_lifts_the_pause():
+    cog, session, thread = plugin({"paused": [900]})
+    session.answers.append((503, {"error": {"code": "engine_unavailable", "message": "Dexbi couldn't do that just now. Nothing changed. Please retry."}}))
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_resume.callback(cog, ctx))
+    assert ctx.embed.title == "Dexbi couldn't resume" and "Please retry." in ctx.embed.description
+    assert cog.config["paused"] == []
+
+
+def test_a_timed_pause_lifts_itself_also_after_a_restart(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(dexbi.time, "time", lambda: now[0])
+    cog, session, thread = plugin()
+    run(cog.save(key="dexbi_test"))
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_pause.callback(cog, ctx, "1h"))
+    assert "for 1 hour" in ctx.embed.description
+    assert cog.config["paused"] == [900] and cog.config["pause_ends"] == {"900": 4600.0}
+
+    # a restart reads the config back the way cog_load does
+    restarted = dexbi.Dexbi(cog.bot)
+    restarted.config = run(cog.db.find_one({"_id": "config"}))
+    member_says(restarted, thread)
+    assert session.requests == []
+
+    now[0] = 4601.0
+    member_says(restarted, thread)
+    assert len(session.requests) == 1 and restarted.paused_threads() == []
+
+
+def test_pausing_again_replaces_the_length():
+    cog, session, thread = plugin()
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_pause.callback(cog, ctx, "30m"))
+    run(cog.dexbi_pause.callback(cog, ctx))
+    assert cog.config["paused"] == [900] and cog.config["pause_ends"] == {}
+
+
+def test_a_pause_length_is_30m_1h_or_24h():
+    assert [dexbi.pause_length(length) for length in ("30m", "1H", " 24h ")] == ["30m", "1h", "24h"]
+    for wrong in ("2h", "forever", "60"):
+        try:
+            dexbi.pause_length(wrong)
+        except commands.BadArgument as error:
+            assert "30m, 1h or 24h" in str(error)
+        else:
+            raise AssertionError(wrong)
+
+
+def test_forget_starts_the_thread_fresh_and_keeps_its_pause():
+    cog, session, thread = plugin({"paused": [900]})
+    session.answers.append((200, {"action": "forget", "conversation": "modmail-900"}))
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_forget.callback(cog, ctx))
+    assert session.requests[0]["url"] == "https://api.dexbi.app/v1/conversations/forget"
+    assert session.requests[0]["body"] == {"conversation": "modmail-900"}
+    assert ctx.embed.title == "Dexbi forgot this thread" and "stays paused" in ctx.embed.description
+    assert cog.config["paused"] == [900]
 
 
 def test_pause_outside_a_thread_says_where_to_run_it():
@@ -925,7 +1026,7 @@ def test_a_wrong_argument_shows_the_usage():
 def test_the_cog_and_its_commands_load():
     names = {command.qualified_name for command in dexbi.Dexbi.__cog_commands__}
     assert names == {"dexbi", "dexbi connect", "dexbi key", "dexbi test", "dexbi pause", "dexbi resume",
-                     "dexbi status", "dexbi setup"}
+                     "dexbi forget", "dexbi status", "dexbi setup"}
     assert isinstance(dexbi.make_embed("x"), discord.Embed)
 
 

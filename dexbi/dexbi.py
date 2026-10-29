@@ -2,6 +2,7 @@ import asyncio
 import copy
 import io
 import re
+import time
 import uuid
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -13,7 +14,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 logger = getLogger(__name__)
 
@@ -27,6 +28,8 @@ COLOR = 0x3ECF8E
 DEFAULT_WAIT = 5
 CHECK_IN_SECONDS = 600
 PLUGIN_PATH = "throgz/modmail-plugins/dexbi"
+# `?dexbi pause <length>`: minutes, and how the embeds say it
+PAUSE_LENGTHS = {"30m": (30, "30 minutes"), "1h": (60, "1 hour"), "24h": (1440, "24 hours")}
 
 TICKET_SETTINGS = {
     "agent": "ticket",
@@ -210,6 +213,13 @@ def make_embed(title, description=None):
     return discord.Embed(title=title, description=description, color=COLOR)
 
 
+def pause_length(argument):
+    length = argument.strip().lower()
+    if length not in PAUSE_LENGTHS:
+        raise commands.BadArgument("Pick 30m, 1h or 24h, or leave it out to pause until you resume.")
+    return length
+
+
 def invoked_command(ctx):
     """The command a message runs, down to its subcommand (`plugins add`)."""
     command = ctx.command
@@ -265,7 +275,31 @@ class Dexbi(commands.Cog):
         return self.config.get("deployment")
 
     def paused(self, channel_id):
-        return channel_id in self.config.get("paused", [])
+        if channel_id not in self.config.get("paused", []):
+            return False
+        # a timed pause keeps its end, so it lifts itself, also across restarts
+        ends = self.config.get("pause_ends", {}).get(str(channel_id))
+        return ends is None or ends > time.time()
+
+    def paused_threads(self):
+        return [c for c in self.config.get("paused", []) if self.paused(c)]
+
+    async def pause(self, channel_id, minutes=None):
+        paused, ends = self.pauses_without(channel_id)
+        if minutes:
+            ends[str(channel_id)] = time.time() + minutes * 60
+        await self.save(paused=paused + [channel_id], pause_ends=ends)
+
+    async def lift_pause(self, channel_id):
+        if channel_id in self.config.get("paused", []):
+            paused, ends = self.pauses_without(channel_id)
+            await self.save(paused=paused, pause_ends=ends)
+
+    def pauses_without(self, channel_id):
+        # the pauses still running, minus this thread's
+        paused = [c for c in self.paused_threads() if c != channel_id]
+        ends = {k: v for k, v in self.config.get("pause_ends", {}).items() if int(k) in paused}
+        return paused, ends
 
     async def save(self, **changes):
         self.config.update(changes)
@@ -288,6 +322,10 @@ class Dexbi(commands.Cog):
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
         kind = error.get("code") or ("not_found" if status == 404 else "internal")
         raise DexbiError(kind, error.get("message", f"Dexbi answered with HTTP {status}."))
+
+    async def control(self, thread, action):
+        # resume also takes back a thread Dexbi escalated, or couldn't answer while out of replies
+        return await self.call("POST", f"conversations/{action}", {"conversation": conversation_of(thread)})
 
     async def call_api(self, body):
         answer = await self.call("POST", "messages", body)
@@ -395,13 +433,14 @@ class Dexbi(commands.Cog):
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
-        if not self.enabled or self.paused(thread.channel.id) or self.sent_by_dexbi(message):
+        if not self.enabled or self.sent_by_dexbi(message):
             return
         lock = self.locks.setdefault(thread.channel.id, asyncio.Lock())
         async with lock:
+            # staff replies are still sent while paused, so Dexbi knows what they said when it's back
             if from_mod:
                 await self.relay_staff_message(thread, message)
-            else:
+            elif not self.paused(thread.channel.id):
                 await self.answer_member(thread, message)
 
     def sent_by_dexbi(self, message):
@@ -414,8 +453,7 @@ class Dexbi(commands.Cog):
         self.noted_errors.pop(channel_id, None)
         self.renamed.discard(channel_id)
         self.locks.pop(channel_id, None)
-        if self.paused(channel_id):
-            await self.save(paused=[c for c in self.config["paused"] if c != channel_id])
+        await self.lift_pause(channel_id)
 
     async def answer_member(self, thread, message):
         if not readable(message):
@@ -574,7 +612,7 @@ class Dexbi(commands.Cog):
     async def alert_staff(self, thread, staff_note):
         roles = self.handover_roles(thread.channel.guild)
         embed = make_embed("Dexbi escalated this thread to your team", staff_note or None)
-        embed.set_footer(text="Dexbi stays quiet in this thread now.")
+        embed.set_footer(text=f"Dexbi stays quiet in this thread now. {self.bot.prefix}dexbi resume gives it back to Dexbi.")
         mentions = discord.AllowedMentions(everyone=False, users=False, roles=roles or False)
         content = " ".join(role.mention for role in roles) or None
         await thread.channel.send(content, embed=embed, allowed_mentions=mentions)
@@ -611,7 +649,7 @@ class Dexbi(commands.Cog):
         embed.add_field(name="Check", value="Not working" if error else "Working")
         embed.add_field(name="Replies as", value=self.replies_as())
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
-        embed.add_field(name="Paused threads", value=str(len(self.config.get("paused", []))))
+        embed.add_field(name="Paused threads", value=str(len(self.paused_threads())))
         embed.add_field(name="Plugin", value=f"v{__version__}")
         # what's wrong now says how to fix it; otherwise show the last thing that went wrong
         if error:
@@ -624,7 +662,9 @@ class Dexbi(commands.Cog):
                 [
                     f"`{p}dexbi connect <code>` connect to your Dexbi dashboard",
                     f"`{p}dexbi test How do refunds work?` try an answer here",
-                    f"`{p}dexbi pause` / `{p}dexbi resume` stop or restart Dexbi in one thread",
+                    f"`{p}dexbi pause [30m|1h|24h]` stop Dexbi in one thread, it still reads your replies",
+                    f"`{p}dexbi resume` let Dexbi answer in one thread again, also after it escalated",
+                    f"`{p}dexbi forget` start one thread fresh",
                     f"`{p}dexbi setup` the setup steps",
                     f"`{p}dexbi key <key>` use an API key instead",
                 ]
@@ -754,25 +794,55 @@ class Dexbi(commands.Cog):
 
     @dexbi.command(name="pause")
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    async def dexbi_pause(self, ctx):
-        """Stop Dexbi in this thread."""
+    async def dexbi_pause(self, ctx, length: pause_length = None):
+        """Stop Dexbi in this thread until you resume it, or for 30m, 1h or 24h."""
         thread = await self.thread_here(ctx)
         if thread is None:
             return
         self.stop_waiting(thread.channel.id)
-        if not self.paused(thread.channel.id):
-            await self.save(paused=self.config.get("paused", []) + [thread.channel.id])
-        await ctx.send(embed=make_embed("Dexbi paused here", f"Dexbi won't answer in this thread. `{ctx.prefix}dexbi resume` to undo."))
+        minutes, label = PAUSE_LENGTHS.get(length, (None, None))
+        await self.pause(thread.channel.id, minutes)
+        until = f"for {label}" if label else "until you resume it"
+        text = (
+            f"Dexbi won't answer in this thread {until}. It still reads your replies, so it knows what you told "
+            f"the member. `{ctx.prefix}dexbi resume` to undo."
+        )
+        await ctx.send(embed=make_embed("Dexbi paused here", text))
 
     @dexbi.command(name="resume")
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     async def dexbi_resume(self, ctx):
-        """Let Dexbi answer in this thread again."""
+        """Let Dexbi answer in this thread again, also after it escalated the thread to your team."""
         thread = await self.thread_here(ctx)
         if thread is None:
             return
-        await self.save(paused=[c for c in self.config.get("paused", []) if c != thread.channel.id])
+        await self.lift_pause(thread.channel.id)
+        if self.enabled:
+            try:
+                await self.control(thread, "resume")
+            except DexbiError as e:
+                text = f"Dexbi isn't paused here, but it couldn't take the thread back: {explain(e, ctx.prefix, bool(self.deployment))}"
+                return await ctx.send(embed=make_embed("Dexbi couldn't resume", text))
         await ctx.send(embed=make_embed("Dexbi resumed here", "Dexbi answers new messages in this thread again."))
+
+    @dexbi.command(name="forget")
+    @checks.has_permissions(PermissionLevel.SUPPORTER)
+    async def dexbi_forget(self, ctx):
+        """Make Dexbi forget this thread so far and start fresh."""
+        thread = await self.thread_here(ctx)
+        if thread is None:
+            return
+        if not self.enabled:
+            return await ctx.send(embed=self.setup_embed(ctx))
+        self.stop_waiting(thread.channel.id)
+        try:
+            await self.control(thread, "forget")
+        except DexbiError as e:
+            return await ctx.send(embed=make_embed("Dexbi couldn't forget", explain(e, ctx.prefix, bool(self.deployment))))
+        text = "Dexbi starts fresh with the next message here."
+        if self.paused(thread.channel.id):
+            text += f" It stays paused until you run `{ctx.prefix}dexbi resume`."
+        await ctx.send(embed=make_embed("Dexbi forgot this thread", text))
 
 
 async def setup(bot):

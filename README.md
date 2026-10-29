@@ -32,7 +32,9 @@ Rather use an API key? Create one under **Settings > API keys** and run `?dexbi 
 | `?dexbi connect <code>` | Connect to your Dexbi dashboard with the code from Deploy |
 | `?dexbi key <key>` | Use a Dexbi API key instead of connecting |
 | `?dexbi test <question>` | See Dexbi's answer in the channel, without messaging anyone |
-| `?dexbi pause` / `?dexbi resume` | Stop or restart Dexbi in the current thread |
+| `?dexbi pause [30m\|1h\|24h]` | Stop Dexbi in the current thread, until you resume it or for that long. Staff replies still reach Dexbi |
+| `?dexbi resume` | Let Dexbi answer in the current thread again, also after it escalated the thread |
+| `?dexbi forget` | Make Dexbi forget the current thread and start fresh |
 | `?dexbi status` / `?dexbi setup` | Status, or the setup steps |
 
 `connect`, `key` and `test` need the Administrator permission level. The rest work for Supporters.
@@ -42,7 +44,8 @@ Rather use an API key? Create one under **Settings > API keys** and run `?dexbi 
 - Each answer from Dexbi counts as one AI reply on your Dexbi plan. Staff messages are free.
 - On the free plan, replies are sent as Dexbi (its name and logo) and end with a "Powered by dexbi.app" line, also when you reply anonymously. On a paid plan there's no line, and replies are sent as your bot, your Dexbi Personalize profile if you set one, or anonymous staff.
 - When staff replied last in a thread, Dexbi waits for them before it answers the member. If no staff message comes in time, it answers everything the member said. Set the wait to Never in the dashboard and it leaves the thread to your staff instead. A message that starts with Dexbi's name is answered right away.
-- When your plan's AI replies for the month run out, Dexbi stays quiet until they reset.
+- After Dexbi escalates a thread, it stays quiet there. Run `?dexbi resume` in the thread to give it back to Dexbi (from 1.3.0).
+- When your plan's AI replies for the month run out, Dexbi stays quiet until they reset. Threads it couldn't answer meanwhile stay with your staff; `?dexbi resume` gives one back.
 - Screenshots from your Dexbi documents show up as images in the reply.
 - Dexbi reads screenshots members send (up to 4 per message). Other files are passed on by name only.
 - If something goes wrong (bot disconnected, plan limit), the member sees nothing and staff get one note in the thread.
