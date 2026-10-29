@@ -14,7 +14,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 logger = getLogger(__name__)
 
@@ -28,6 +28,8 @@ COLOR = 0x3ECF8E
 DEFAULT_WAIT = 5
 CHECK_IN_SECONDS = 600
 PLUGIN_PATH = "throgz/modmail-plugins/dexbi"
+RELEASES_URL = "https://github.com/throgz/modmail-plugins/commits/master/dexbi"
+ICON_URL = "https://www.dexbi.app/dexbi-icon.png"
 # `?dexbi pause <length>`: minutes, and how the embeds say it
 PAUSE_LENGTHS = {"30m": (30, "30 minutes"), "1h": (60, "1 hour"), "24h": (1440, "24 hours")}
 
@@ -213,6 +215,22 @@ def make_embed(title, description=None):
     return discord.Embed(title=title, description=description, color=COLOR)
 
 
+def version_of(text):
+    # "1.3.1" -> (1, 3, 1), None for anything else
+    parts = (text or "").strip().split(".")
+    return tuple(map(int, parts)) if len(parts) == 3 and all(p.isdigit() for p in parts) else None
+
+
+def update_embed(prefix, latest):
+    embed = make_embed("Dexbi update available", f"Version **{latest}** is out. This server runs **{__version__}**.")
+    embed.url = RELEASES_URL
+    embed.set_thumbnail(url=ICON_URL)
+    embed.add_field(name="Update", value=f"```\n{prefix}plugins update {PLUGIN_PATH}@master\n```", inline=False)
+    embed.add_field(name="What changed", value=f"[See the changes]({RELEASES_URL})", inline=False)
+    embed.set_footer(text="Only your staff can see this. Posted once for each new version.")
+    return embed
+
+
 def pause_length(argument):
     length = argument.strip().lower()
     if length not in PAUSE_LENGTHS:
@@ -315,13 +333,36 @@ class Dexbi(commands.Cog):
             ) as resp:
                 payload = await resp.json(content_type=None)
                 status = resp.status
+                latest = resp.headers.get("X-Dexbi-Plugin-Latest")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             raise DexbiError("unreachable", "Dexbi can't be reached right now.") from e
+        await self.announce_update(latest)
         if status == 200 and isinstance(payload, dict):
             return payload
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
         kind = error.get("code") or ("not_found" if status == 404 else "internal")
         raise DexbiError(kind, error.get("message", f"Dexbi answered with HTTP {status}."))
+
+    async def announce_update(self, latest):
+        # one notice per new release, in the log channel staff already watch
+        newest = version_of(latest)
+        if newest is None or newest <= version_of(__version__):
+            return
+        if latest != self.config.get("latest_version"):
+            await self.save(latest_version=latest)
+        channel = getattr(self.bot, "log_channel", None)
+        if channel is None or self.config.get("announced_version") == latest:
+            return
+        await self.save(announced_version=latest)
+        try:
+            await channel.send(embed=update_embed(self.bot.prefix, latest))
+        except discord.HTTPException:
+            pass
+
+    def update_waiting(self):
+        latest = self.config.get("latest_version")
+        newest = version_of(latest)
+        return latest if newest and newest > version_of(__version__) else None
 
     async def control(self, thread, action):
         # resume also takes back a thread Dexbi escalated, or couldn't answer while out of replies
@@ -650,7 +691,8 @@ class Dexbi(commands.Cog):
         embed.add_field(name="Replies as", value=self.replies_as())
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.paused_threads())))
-        embed.add_field(name="Plugin", value=f"v{__version__}")
+        waiting = self.update_waiting()
+        embed.add_field(name="Plugin", value=f"v{__version__} (v{waiting} is out)" if waiting else f"v{__version__}")
         # what's wrong now says how to fix it; otherwise show the last thing that went wrong
         if error:
             embed.add_field(name="What to do", value=explain(error, p, bool(self.deployment))[:1024], inline=False)

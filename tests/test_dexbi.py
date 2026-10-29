@@ -25,8 +25,8 @@ dexbi.asyncio.sleep = no_wait
 
 
 class FakeResponse:
-    def __init__(self, status, payload):
-        self.status, self.payload = status, payload
+    def __init__(self, status, payload, headers=None):
+        self.status, self.payload, self.headers = status, payload, headers or {}
 
     async def json(self, content_type=None):
         return self.payload
@@ -45,6 +45,7 @@ class FakeSession:
     def __init__(self):
         self.requests = []
         self.answers = []
+        self.latest = None
 
     def get(self, url, *, timeout):
         self.requests.append({"url": url})
@@ -53,7 +54,7 @@ class FakeSession:
     def request(self, method, url, *, json=None, headers=None, timeout=None):
         self.requests.append({"method": method, "url": url, "body": json, "headers": headers})
         status, payload = self.answers.pop(0) if self.answers else (200, answer("none"))
-        return FakeResponse(status, payload)
+        return FakeResponse(status, payload, {"X-Dexbi-Plugin-Latest": self.latest} if self.latest else None)
 
 
 class FakeCollection:
@@ -709,7 +710,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.0"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.1"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -792,7 +793,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.3.0"
+    assert dexbi.__version__ == "1.3.1"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -815,7 +816,7 @@ def test_status_shows_the_connection_settings_and_commands():
     assert "?dexbi connect" in fields["Commands"] and "?dexbi pause [30m|1h|24h]" in fields["Commands"]
     assert "?dexbi resume" in fields["Commands"] and "?dexbi forget" in fields["Commands"]
     assert "?dexbi wait" not in fields["Commands"] and "?dexbi role" not in fields["Commands"]
-    assert fields["Plugin"] == "v1.3.0"
+    assert fields["Plugin"] == f"v{dexbi.__version__}"
     assert ctx.embed.color.value == dexbi.COLOR
     assert session.requests[1]["body"]["author"] == "staff"
 
@@ -1165,3 +1166,37 @@ def test_an_update_that_fails_is_logged_not_raised(caplog):
     modmail.group.get_command("update").callback = broken
     run(cog.on_message(server_message("?plugins add throgz/modmail-plugins/dexbi")))
     assert "Updating the Dexbi plugin failed." in caplog.text
+
+
+def test_a_new_release_is_announced_once_in_the_log_channel():
+    cog, session, thread = plugin()
+    session.latest = "9.0.0"
+    member_says(cog, thread)
+    member_says(cog, thread, "still there?")
+    [notice] = [m for m in cog.bot.log_channel.sent if m.embed and m.embed.title == "Dexbi update available"]
+    assert "**9.0.0**" in notice.embed.description and f"**{dexbi.__version__}**" in notice.embed.description
+    assert "?plugins update throgz/modmail-plugins/dexbi@master" in notice.embed.fields[0].value
+    assert cog.config["announced_version"] == "9.0.0"
+
+
+def test_the_announcement_survives_a_restart_without_posting_again():
+    cog, session, thread = plugin({"announced_version": "9.0.0"})
+    session.latest = "9.0.0"
+    member_says(cog, thread)
+    assert [m for m in cog.bot.log_channel.sent if m.embed and m.embed.title == "Dexbi update available"] == []
+
+
+def test_the_running_version_or_an_older_one_is_not_announced():
+    for latest in (dexbi.__version__, "0.9.0", "not-a-version"):
+        cog, session, thread = plugin()
+        session.latest = latest
+        member_says(cog, thread)
+        assert cog.bot.log_channel.sent == [] and "announced_version" not in cog.config
+
+
+def test_status_says_when_a_newer_plugin_is_out():
+    cog, session, _ = plugin({"latest_version": "9.0.0"})
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi.callback(cog, ctx))
+    fields = {field.name: field.value for field in ctx.embed.fields}
+    assert fields["Plugin"] == f"v{dexbi.__version__} (v9.0.0 is out)"
