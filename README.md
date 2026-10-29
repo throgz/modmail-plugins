@@ -41,7 +41,7 @@ Rather use an API key? Create one under **Settings > API keys** and run `?dexbi 
 
 - Each answer from Dexbi counts as one AI reply on your Dexbi plan. Staff messages are free.
 - On the free plan, replies are sent as Dexbi (its name and logo) and end with a "Powered by dexbi.app" line, also when you reply anonymously. On a paid plan there's no line, and replies are sent as your bot, your Dexbi Personalize profile if you set one, or anonymous staff.
-- When staff replied last in a thread, Dexbi waits for them before it answers the member. If no staff message comes in time, it answers everything the member said. A message that starts with Dexbi's name is answered right away.
+- When staff replied last in a thread, Dexbi waits for them before it answers the member. If no staff message comes in time, it answers everything the member said. Set the wait to Never in the dashboard and it leaves the thread to your staff instead. A message that starts with Dexbi's name is answered right away.
 - When your plan's AI replies for the month run out, Dexbi stays quiet until they reset.
 - Screenshots from your Dexbi documents show up as images in the reply.
 - Dexbi reads screenshots members send (up to 4 per message). Other files are passed on by name only.
