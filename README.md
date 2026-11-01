@@ -48,7 +48,8 @@ When a new version is out, Dexbi posts one notice in your Modmail log channel wi
 - When your plan's AI replies for the month run out, Dexbi stays quiet until they reset. Threads it couldn't answer meanwhile stay with your staff; `?dexbi resume` gives one back.
 - Screenshots from your Dexbi documents show up as images in the reply.
 - Dexbi reads screenshots members send (up to 4 per message). Other files are passed on by name only.
-- If something goes wrong (bot disconnected, plan limit), the member sees nothing and staff get one note in the thread.
+- If something goes wrong while Dexbi is on (plan limit, Dexbi down), the member sees nothing and staff get one note in the thread.
+- While the deployment is paused, or after it's disconnected or deleted, the plugin posts nothing at all. Modmail works as if Dexbi wasn't there.
 - If the bot gets disconnected (Disconnect in the dashboard, or the deployment was deleted), `?dexbi` shows **Disconnected**. To reconnect, open your Modmail deployment under **Deploy**, click **Reconnect** and run the `?dexbi connect` command it shows.
 - Docs: https://docs.dexbi.app/tutorials/modmail
 

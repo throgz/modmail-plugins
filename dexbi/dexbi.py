@@ -14,7 +14,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 logger = getLogger(__name__)
 
@@ -292,7 +292,8 @@ class Dexbi(commands.Cog):
 
     @property
     def enabled(self):
-        return bool(self.config.get("key"))
+        # a refused key (deployment deleted, disconnected or reconnected elsewhere) is the same as no key
+        return bool(self.config.get("key")) and not self.config.get("refused")
 
     @property
     def deployment(self):
@@ -302,6 +303,11 @@ class Dexbi(commands.Cog):
     @property
     def deployment_paused(self):
         return bool(self.deployment and self.deployment.get("paused"))
+
+    @property
+    def active(self):
+        # paused or disconnected, the bot posts nothing at all, as if Dexbi weren't there
+        return self.enabled and not self.deployment_paused
 
     def paused(self, channel_id):
         if channel_id not in self.config.get("paused", []):
@@ -347,12 +353,25 @@ class Dexbi(commands.Cog):
                 latest = resp.headers.get("X-Dexbi-Plugin-Latest")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             raise DexbiError("unreachable", "Dexbi can't be reached right now.") from e
+        ok = status == 200 and isinstance(payload, dict)
+        error = {} if ok or not isinstance(payload, dict) else payload.get("error", {})
+        kind = None if ok else error.get("code") or ("not_found" if status == 404 else "internal")
+        if auth and (ok or kind == "invalid_key"):
+            await self.mark_refused(not ok)
+        if ok and auth and "deployment" in payload:
+            await self.remember(payload["deployment"])
         await self.announce_update(latest)
-        if status == 200 and isinstance(payload, dict):
+        if ok:
             return payload
-        error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        kind = error.get("code") or ("not_found" if status == 404 else "internal")
         raise DexbiError(kind, error.get("message", f"Dexbi answered with HTTP {status}."))
+
+    async def mark_refused(self, refused):
+        # a refused key isn't used again until a new one is set, so the bot stays out of every thread
+        if refused != bool(self.config.get("refused")):
+            await self.save(refused=refused)
+
+    def refused_text(self, prefix):
+        return explain(DexbiError("invalid_key", ""), prefix, bool(self.deployment))
 
     async def announce_update(self, latest):
         # one notice per new release, in the log channel staff already watch
@@ -362,7 +381,7 @@ class Dexbi(commands.Cog):
         if latest != self.config.get("latest_version"):
             await self.save(latest_version=latest)
         channel = getattr(self.bot, "log_channel", None)
-        if channel is None or self.config.get("announced_version") == latest:
+        if channel is None or not self.active or self.config.get("announced_version") == latest:
             return
         await self.save(announced_version=latest)
         try:
@@ -381,8 +400,6 @@ class Dexbi(commands.Cog):
 
     async def call_api(self, body):
         answer = await self.call("POST", "messages", body)
-        if "deployment" in answer:
-            await self.remember(answer["deployment"])
         if "branding" in answer:
             self.branding = answer["branding"]
         return answer
@@ -396,11 +413,10 @@ class Dexbi(commands.Cog):
         if not self.enabled:
             return
         try:
-            await self.remember((await self.call("GET", "modmail/status")).get("deployment"))
+            await self.call("GET", "modmail/status")
         except DexbiError as e:
             if e.kind != "not_found":
-                self.last_error = f"Dexbi check-in failed: {explain(e, self.bot.prefix, bool(self.deployment))}"
-                logger.warning(self.last_error)
+                self.log_error(f"Dexbi check-in failed: {explain(e, self.bot.prefix, bool(self.deployment))}")
 
     async def keep_checking_in(self):
         while True:
@@ -443,12 +459,19 @@ class Dexbi(commands.Cog):
             return await self.call_api({"conversation": conversation_of(thread), "settings": self.ticket_settings(), **body})
         except DexbiError as e:
             explanation = explain(e, self.bot.prefix, bool(self.deployment))
-            await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explanation)
+            if e.kind == "invalid_key" or not self.active:
+                # no deployment any more, or it's paused: nothing in the thread, `?dexbi` says why
+                self.log_error(f"Dexbi couldn't answer: {explanation}")
+            else:
+                await self.note_failure(thread, e.kind, "Dexbi couldn't answer", explanation)
             return None
 
+    def log_error(self, text):
+        self.last_error = text
+        logger.warning(text)
+
     async def note_failure(self, thread, kind, title, text):
-        self.last_error = f"{title}: {text}"
-        logger.warning(self.last_error)
+        self.log_error(f"{title}: {text}")
         noted = self.noted_errors.setdefault(thread.channel.id, set())
         if kind in noted:
             return
@@ -799,7 +822,7 @@ class Dexbi(commands.Cog):
     async def dexbi_key(self, ctx, key: str):
         """Set your Dexbi API key."""
         warning = await self.delete_command(ctx, "key")
-        await self.save(key=key.strip(), deployment=None)
+        await self.save(key=key.strip(), deployment=None, refused=False)
         error = await self.check_key(ctx.author)
         if error:
             embed = make_embed("Key saved, but it doesn't work", f"{explain(error, ctx.prefix)}{warning}")
@@ -816,7 +839,7 @@ class Dexbi(commands.Cog):
             connected = await self.call("POST", "modmail/connect", {"code": code}, auth=False)
         except DexbiError as e:
             return await ctx.send(embed=make_embed("Couldn't connect", f"{explain(e, ctx.prefix)}{warning}"))
-        await self.save(key=connected["key"], deployment=connected["deployment"])
+        await self.save(key=connected["key"], deployment=connected["deployment"], refused=False)
         text = (
             f"Dexbi now answers in your Modmail threads as **{connected['deployment']['name']}**. "
             f"Change how it answers in the [Dexbi dashboard]({DASHBOARD_URL}) under **Deploy**.{warning}"
@@ -871,6 +894,10 @@ class Dexbi(commands.Cog):
             f"Dexbi won't answer in this thread {until}. It still reads your replies, so it knows what you told "
             f"the member. `{ctx.prefix}dexbi resume` to undo."
         )
+        if self.config.get("refused"):
+            text = f"Dexbi won't answer in this thread {until}. {self.refused_text(ctx.prefix)}"
+        elif self.deployment_paused:
+            text = f"Dexbi won't answer in this thread {until}. {paused_text()}"
         await ctx.send(embed=make_embed("Dexbi paused here", text))
 
     @dexbi.command(name="resume")
@@ -881,6 +908,8 @@ class Dexbi(commands.Cog):
         if thread is None:
             return
         await self.lift_pause(thread.channel.id)
+        if self.config.get("refused"):
+            return await ctx.send(embed=make_embed("Dexbi is disconnected", self.refused_text(ctx.prefix)))
         if self.enabled:
             try:
                 await self.control(thread, "resume")
@@ -899,6 +928,8 @@ class Dexbi(commands.Cog):
         thread = await self.thread_here(ctx)
         if thread is None:
             return
+        if self.config.get("refused"):
+            return await ctx.send(embed=make_embed("Dexbi is disconnected", self.refused_text(ctx.prefix)))
         if not self.enabled:
             return await ctx.send(embed=self.setup_embed(ctx))
         self.stop_waiting(thread.channel.id)

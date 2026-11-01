@@ -540,6 +540,20 @@ def test_a_paused_deployment_leaves_the_thread_to_modmail():
     assert thread.closed_by is None and thread.channel.name == "alex"
 
 
+def test_a_paused_deployment_posts_no_failure_and_no_update_notice():
+    cog, session, thread = plugin({"deployment": {**deployment(), "paused": True}})
+    session.latest = "9.9.9"
+    session.answers.append((503, {"error": {"code": "engine_unavailable", "message": "Dexbi couldn't answer just now."}}))
+    member_says(cog, thread)
+    assert thread.channel.sent == [] and cog.bot.log_channel.sent == []
+    assert "couldn't answer" in cog.last_error and cog.update_waiting() == "9.9.9"
+
+    # resumed: the notice goes out once
+    session.answers.append((200, {**answer("none"), "deployment": deployment()}))
+    member_says(cog, thread)
+    assert [m.embed.title for m in cog.bot.log_channel.sent] == ["Dexbi update available"]
+
+
 def test_a_title_renames_the_thread_once_keeping_its_name():
     cog, session, thread = plugin()
     session.answers += [(200, answer("reply", "On it.", title="double-charge")), (200, answer("none", title="other"))]
@@ -553,24 +567,37 @@ def test_a_title_renames_the_thread_once_keeping_its_name():
 
 def test_a_failure_is_told_to_staff_once_per_kind_and_never_to_the_member():
     cog, session, thread = plugin()
-    bad_key = (401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}})
     limit = (429, {"error": {"code": "rate_limited", "message": "Over 10 calls a minute for this workspace. Retry after the reset."}})
-    session.answers += [bad_key, bad_key, limit]
+    broken = (500, {"error": {"code": "internal", "message": "Something went wrong on our side."}})
+    session.answers += [limit, limit, broken]
     for _ in range(3):
         member_says(cog, thread)
     notes = [sent.embed for sent in thread.channel.sent]
     assert [note.title for note in notes] == ["Dexbi couldn't answer", "Dexbi couldn't answer"]
-    assert "Settings > API keys" in notes[0].description and "`?dexbi key <key>`" in notes[0].description
-    assert "calls a minute" in notes[1].description
+    assert "calls a minute" in notes[0].description and "on our side" in notes[1].description
     assert thread.replies == [] and cog.last_error.endswith(notes[1].description)
 
 
-def test_a_bot_that_was_disconnected_says_how_to_connect_again():
+def test_a_disconnected_bot_stays_out_of_threads_like_one_never_connected():
+    # the deployment was deleted, disconnected or reconnected on another bot
     cog, session, thread = plugin({"deployment": deployment()})
     session.answers.append((401, {"error": {"code": "invalid_key", "message": "Missing or invalid API key."}}))
     member_says(cog, thread)
-    note = thread.channel.sent[0].embed.description
-    assert "disconnected from Dexbi" in note and "**Reconnect**" in note and "`?dexbi connect`" in note
+    assert cog.config["refused"] is True and "disconnected from Dexbi" in cog.last_error
+    staff_says(cog, thread, "?reply on it")
+    member_says(cog, thread)
+    run(cog.check_in())
+    assert len(session.requests) == 1
+    assert thread.channel.sent == [] and thread.recipient.sent == [] and thread.replies == []
+
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_resume.callback(cog, ctx))
+    assert ctx.embed.title == "Dexbi is disconnected" and "**Reconnect**" in ctx.embed.description
+
+    session.answers.append((200, {"key": "dexbi_new", "deployment": deployment()}))
+    run(cog.dexbi_connect.callback(cog, FakeContext(FakeChannel(1)), code="abcd-2345"))
+    member_says(cog, thread)
+    assert cog.config["refused"] is False and session.requests[-1]["url"].endswith("/messages")
 
 
 def test_dexbi_being_down_says_it_will_answer_again():
@@ -730,7 +757,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.2"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.3"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -804,7 +831,7 @@ def test_checking_in_quietly_skips_an_older_dexbi_and_notes_a_dead_key():
     run(cog.check_in())
     assert cog.last_error is None and cog.config["deployment"] == deployment()
     run(cog.check_in())
-    assert "disconnected from Dexbi" in cog.last_error
+    assert "disconnected from Dexbi" in cog.last_error and cog.config["refused"] is True
     assert thread.channel.sent == []
 
 
@@ -813,7 +840,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.3.2"
+    assert dexbi.__version__ == "1.3.3"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -1018,6 +1045,18 @@ def test_a_timed_pause_lifts_itself_also_after_a_restart(monkeypatch):
     now[0] = 4601.0
     member_says(restarted, thread)
     assert len(session.requests) == 1 and restarted.paused_threads() == []
+
+
+def test_pause_says_when_dexbi_is_already_off_everywhere():
+    cog, session, thread = plugin({"deployment": {**deployment(), "paused": True}})
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_pause.callback(cog, ctx))
+    assert cog.config["paused"] == [900] and "**Resume**" in ctx.embed.description
+    cog, session, thread = plugin({"deployment": deployment(), "refused": True})
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_pause.callback(cog, ctx))
+    assert cog.config["paused"] == [900] and "**Reconnect**" in ctx.embed.description
+    assert session.requests == []
 
 
 def test_pausing_again_replaces_the_length():
