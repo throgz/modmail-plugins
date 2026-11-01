@@ -395,6 +395,16 @@ def test_a_long_reply_is_sent_in_parts():
     assert all(r.message.content == r.content for r in thread.replies)
 
 
+def test_a_reply_has_its_own_id_and_time_like_a_staff_reply():
+    # Modmail links a reply to its copies by the id; with the member's, their edits would land on it
+    cog, session, thread = plugin()
+    session.answers.append((200, answer("reply", ("a" * 3000) + "\n\n" + ("b" * 3000))))
+    member_says(cog, thread)
+    ids = [r.message.id for r in thread.replies]
+    assert 777 not in ids and len(set(ids)) == 2
+    assert all(r.message.created_at is not None for r in thread.replies)
+
+
 def test_reply_as_anonymous_staff_comes_from_the_dashboard():
     cog, session, thread = plugin({"deployment": deployment("anonymous"), "anonymous": False})
     session.answers.append((200, answer("reply", "Refunds take 5 days.")))
@@ -518,6 +528,16 @@ def test_none_does_nothing():
     cog, session, thread = plugin()
     member_says(cog, thread)
     assert thread.replies == [] and thread.channel.sent == [] and thread.closed_by is None
+
+
+def test_a_paused_deployment_leaves_the_thread_to_modmail():
+    cog, session, thread = plugin({"deployment": deployment()})
+    paused = {**answer("none"), "deployment": {**deployment(), "paused": True}}
+    session.answers += [(200, paused), (200, paused)]
+    member_says(cog, thread)
+    staff_says(cog, thread, "?reply looking into it")
+    assert thread.replies == [] and thread.channel.sent == [] and thread.recipient.sent == []
+    assert thread.closed_by is None and thread.channel.name == "alex"
 
 
 def test_a_title_renames_the_thread_once_keeping_its_name():
@@ -710,7 +730,7 @@ def test_connect_saves_the_key_and_the_deployment():
     run(cog.dexbi_connect.callback(cog, ctx, code="abcd-2345"))
     request = session.requests[0]
     assert request["method"] == "POST" and request["url"] == "https://api.dexbi.app/v1/modmail/connect"
-    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.1"}
+    assert request["body"] == {"code": "abcd-2345"} and request["headers"] == {"X-Dexbi-Plugin": "modmail/1.3.2"}
     assert cog.config["key"] == "dexbi_connected" and cog.config["deployment"]["name"] == "Modmail"
     assert ctx.embed.title == "Connected" and "**Modmail**" in ctx.embed.description
     member_says(cog, thread)
@@ -793,7 +813,7 @@ def test_every_call_says_which_plugin_version_it_is():
     run(cog.check_in())
     member_says(cog, thread)
     assert all(request["headers"]["X-Dexbi-Plugin"] == f"modmail/{dexbi.__version__}" for request in session.requests)
-    assert dexbi.__version__ == "1.3.1"
+    assert dexbi.__version__ == "1.3.2"
 
 
 def test_without_a_key_there_is_no_check_in():
@@ -852,6 +872,16 @@ def test_status_says_when_the_bot_was_disconnected():
     assert "**Reconnect**" in fields["What to do"] and "`?dexbi connect`" in fields["What to do"]
 
 
+def test_status_says_when_the_deployment_is_paused():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((200, {"deployment": {**deployment(), "paused": True}}))
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi.callback(cog, ctx))
+    fields = {field.name: field.value for field in ctx.embed.fields}
+    assert fields["Connection"] == "Connected to **Modmail** (paused)" and fields["Check"] == "Paused"
+    assert "**Resume**" in fields["What to do"] and "Last error" not in fields
+
+
 def test_status_says_when_the_key_does_not_work():
     cog, session, thread = plugin()
     bad_key = (401, {"error": {"code": "invalid_key", "message": "Bad key."}})
@@ -897,6 +927,23 @@ def test_test_shows_the_answer_here_and_messages_no_member():
     fields = {f.name: f.value for f in ctx.embed.fields}
     assert fields == {"Action": "handover", "Staff note": "Wants a refund.", "Suggested title": "refund"}
     assert thread.replies == []
+
+
+def test_test_says_when_the_deployment_is_paused():
+    cog, session, thread = plugin({"deployment": deployment()})
+    session.answers.append((200, {**answer("none"), "deployment": {**deployment(), "paused": True}}))
+    ctx = FakeContext(FakeChannel(1))
+    run(cog.dexbi_test.callback(cog, ctx, question="How do refunds work?"))
+    assert ctx.embed.title == "Dexbi is paused" and "**Resume**" in ctx.embed.description
+
+
+def test_resume_in_a_thread_says_when_the_deployment_is_paused():
+    cog, session, thread = plugin({"deployment": {**deployment(), "paused": True}, "paused": [900]})
+    session.answers.append((200, {"action": "resume", "conversation": "modmail-900"}))
+    ctx = FakeContext(thread.channel)
+    run(cog.dexbi_resume.callback(cog, ctx))
+    assert cog.config["paused"] == [] and ctx.embed.title == "Dexbi resumed here"
+    assert "**Resume**" in ctx.embed.description
 
 
 def test_pause_and_resume_in_a_thread():

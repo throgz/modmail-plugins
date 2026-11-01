@@ -14,7 +14,7 @@ from discord.ext import commands
 from core import checks
 from core.models import DummyMessage, PermissionLevel, getLogger
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 logger = getLogger(__name__)
 
@@ -159,6 +159,13 @@ def person_of(user):
     return {"id": str(user.id), "name": user.display_name[:100]}
 
 
+def paused_text():
+    return (
+        f"This Modmail deployment is paused in the [Dexbi dashboard]({DASHBOARD_URL}), so Dexbi doesn't answer "
+        "in any thread. To turn it back on, go to **Deploy**, open your Modmail deployment and click **Resume**."
+    )
+
+
 def explain(error, prefix, connected=False):
     if error.kind == "invalid_key" and connected:
         return (
@@ -291,6 +298,10 @@ class Dexbi(commands.Cog):
     def deployment(self):
         # the dashboard deployment this bot is connected to, None with a manual key
         return self.config.get("deployment")
+
+    @property
+    def deployment_paused(self):
+        return bool(self.deployment and self.deployment.get("paused"))
 
     def paused(self, channel_id):
         if channel_id not in self.config.get("paused", []):
@@ -582,6 +593,10 @@ class Dexbi(commands.Cog):
         for i, part in enumerate(parts):
             # thread.reply needs a message: reply with a copy authored by the bot
             msg = DummyMessage(copy.copy(member_message))
+            # its own id and time, like a ?reply: Modmail links copies by id, and the member's edits would land here
+            now = discord.utils.utcnow()
+            msg.id = discord.utils.time_snowflake(now) + i
+            msg.created_at = now
             msg.author = ReplyAuthor(self.bot.user, sender)
             msg.channel = thread.channel
             msg.content = part
@@ -681,13 +696,16 @@ class Dexbi(commands.Cog):
         roles = self.handover_roles(ctx.guild) if ctx.guild else []
         if self.deployment and error and error.kind == "invalid_key":
             connection = "Disconnected"
+        elif self.deployment_paused:
+            connection = f"Connected to **{self.deployment.get('name')}** (paused)"
         elif self.deployment:
             connection = f"Connected to **{self.deployment.get('name')}**"
         else:
             connection = "Manual API key"
         embed = make_embed("Dexbi", "Dexbi answers your members in Modmail threads.")
         embed.add_field(name="Connection", value=connection)
-        embed.add_field(name="Check", value="Not working" if error else "Working")
+        check = "Not working" if error else "Paused" if self.deployment_paused else "Working"
+        embed.add_field(name="Check", value=check)
         embed.add_field(name="Replies as", value=self.replies_as())
         embed.add_field(name="Hand-over ping", value=" ".join(r.mention for r in roles) or "No one")
         embed.add_field(name="Paused threads", value=str(len(self.paused_threads())))
@@ -696,6 +714,8 @@ class Dexbi(commands.Cog):
         # what's wrong now says how to fix it; otherwise show the last thing that went wrong
         if error:
             embed.add_field(name="What to do", value=explain(error, p, bool(self.deployment))[:1024], inline=False)
+        elif self.deployment_paused:
+            embed.add_field(name="What to do", value=paused_text(), inline=False)
         else:
             embed.add_field(name="Last error", value=(self.last_error or "None")[:1024], inline=False)
         embed.add_field(
@@ -821,6 +841,8 @@ class Dexbi(commands.Cog):
                 )
             except DexbiError as e:
                 return await ctx.send(embed=make_embed("Dexbi couldn't answer", explain(e, ctx.prefix, bool(self.deployment))))
+        if self.deployment_paused:
+            return await ctx.send(embed=make_embed("Dexbi is paused", paused_text()))
         text = to_embed_text(answer.get("message") or "") or "*(no message)*"
         embed = make_embed("Test answer", split_text(text)[0])
         embed.add_field(name="Action", value=answer.get("action", "none"))
@@ -865,7 +887,10 @@ class Dexbi(commands.Cog):
             except DexbiError as e:
                 text = f"Dexbi isn't paused here, but it couldn't take the thread back: {explain(e, ctx.prefix, bool(self.deployment))}"
                 return await ctx.send(embed=make_embed("Dexbi couldn't resume", text))
-        await ctx.send(embed=make_embed("Dexbi resumed here", "Dexbi answers new messages in this thread again."))
+        text = "Dexbi answers new messages in this thread again."
+        if self.deployment_paused:
+            text = f"This thread is no longer paused. {paused_text()}"
+        await ctx.send(embed=make_embed("Dexbi resumed here", text))
 
     @dexbi.command(name="forget")
     @checks.has_permissions(PermissionLevel.SUPPORTER)
